@@ -1,0 +1,19 @@
+name: Build ClickScope EXE
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pyinstaller
+      - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name ClickScope --icon assets/app.ico --add-data "assets;assets" --paths src src/main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClickScope-Windows
+          path: dist/ClickScope.exe
