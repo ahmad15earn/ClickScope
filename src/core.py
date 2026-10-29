@@ -13,6 +13,7 @@ import sys
 import threading
 
 ANALYSIS_DAYS = 30
+MIN_ACTIVE_DAYS = 7
 APP_NAME = "ClickScope"
 APP_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME)
 
@@ -140,7 +141,92 @@ class Store:
         self.db.commit()
 
     # --- writing
+    # --- ignore list (apps / websites the user does not want counted)
+    def ignored(self):
+        import json
+        try:
+            return set(json.loads(self.get("ignored", "[]")))
+        except ValueError:
+            return set()
+
+    def add_ignore(self, kind, name):
+        import json
+        s = self.ignored()
+        s.add(f"{kind}:{name.lower()}")
+        self.set("ignored", json.dumps(sorted(s)))
+        with self.lock:  # also forget what was already counted for it
+            self.db.execute("DELETE FROM clicks WHERE kind=? AND lower(name)=?", (kind, name.lower()))
+            self.db.commit()
+
+    def clear_ignored(self):
+        self.set("ignored", "[]")
+
+    # --- recovery inventory: apps the user marked as must-keep (clicks do not measure importance)
+    def kept(self):
+        import json
+        try:
+            return list(json.loads(self.get("kept", "[]")))
+        except ValueError:
+            return []
+
+    def toggle_keep(self, name):
+        import json
+        k = self.kept()
+        now = name not in k
+        if now:
+            k.append(name)
+        else:
+            k.remove(name)
+        self.set("kept", json.dumps(k))
+        return now
+
+    def keep_info(self):
+        """[(name, total_clicks, last_day_or_None)] for every kept app."""
+        out = []
+        with self.lock:
+            for name in self.kept():
+                r = self.db.execute("SELECT COALESCE(SUM(n),0), MAX(day) FROM clicks WHERE kind='app' AND lower(name)=?",
+                                    (name.lower(),)).fetchone()
+                out.append((name, int(r[0]), datetime.date.fromisoformat(r[1]) if r[1] else None))
+        return out
+
+    def export_inventory(self, path):
+        info = self.keep_info()
+        kept = {n.lower() for n, _, _ in info}
+        lines = [f"ClickScope recovery checklist  -  {datetime.date.today():%Y-%m-%d}", "",
+                 "Reinstall these first (you marked them as must-keep):", ""]
+        for name, n, last in info:
+            seen = f"last clicked {last:%Y-%m-%d}" if last else "not seen yet (added manually)"
+            lines.append(f"[ ] {name}  ({n:,} clicks, {seen})")
+        if not info:
+            lines.append("(nothing marked yet)")
+        more = [(a, n) for a, n in self.top("app", "all", 15) if a.lower() not in kept and a not in SYSTEM_LABELS]
+        if more:
+            lines += ["", "Also used a lot:", ""] + [f"[ ] {a}  ({n:,} clicks)" for a, n in more]
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    # --- backup / restore (e.g. before reinstalling Windows or moving to a new PC)
+    def backup_to(self, path):
+        dst = sqlite3.connect(path)
+        with self.lock:
+            self.db.backup(dst)
+        dst.close()
+
+    def restore_from(self, path):
+        src = sqlite3.connect(path)
+        with self.lock:
+            src.backup(self.db)
+            self.db.executescript(SCHEMA)
+            self.db.commit()
+        src.close()
+
     def add_click(self, app, site=None, when=None):
+        ign = self.ignored()
+        if f"app:{app.lower()}" in ign:
+            return
+        if site and f"site:{site.lower()}" in ign:
+            site = None
         when = when or datetime.datetime.now()
         day = when.strftime("%Y-%m-%d")
         up = ("INSERT INTO clicks(day,kind,name,n) VALUES(?,?,?,1) "
@@ -267,12 +353,20 @@ class Store:
             self.set("first_run", v)
         return datetime.date.fromisoformat(v)
 
+    def active_days(self):
+        """Days with a meaningful amount of activity (>= 20 clicks)."""
+        with self.lock:
+            return self.db.execute("SELECT COUNT(*) FROM (SELECT day FROM clicks WHERE kind='app' "
+                                   "GROUP BY day HAVING SUM(n) >= 20)").fetchone()[0]
+
     def analysis_progress(self):
-        """(day_number 1..30, ready, unlock_date). Suggestions unlock 30 days after first use."""
+        """(day_number 1..30, ready, unlock_date).
+        Suggestions unlock after 30 days AND at least MIN_ACTIVE_DAYS days of real activity,
+        so a PC that was mostly switched off does not produce suggestions from thin data."""
         first = self.first_run()
         elapsed = (datetime.date.today() - first).days
-        return (min(ANALYSIS_DAYS, elapsed + 1), elapsed >= ANALYSIS_DAYS,
-                first + datetime.timedelta(days=ANALYSIS_DAYS))
+        ready = elapsed >= ANALYSIS_DAYS and self.active_days() >= MIN_ACTIVE_DAYS
+        return (min(ANALYSIS_DAYS, elapsed + 1), ready, first + datetime.timedelta(days=ANALYSIS_DAYS))
 
     def export_csv(self, path):
         with self.lock:
@@ -318,7 +412,8 @@ def build_suggestions(store, rng="30d"):
                             text=f"{sn / s_total:.0%} of your website clicks. Pin it as a tab, or install it as "
                                  "an app window so it is one click away."))
 
-    rare = [a for a, c in reversed(apps) if c <= 5 and c / total <= 0.02 and a not in SYSTEM_LABELS][:3]
+    keep = set(store.kept())
+    rare = [a for a, c in reversed(apps) if c <= 5 and c / total <= 0.02 and a not in SYSTEM_LABELS and a not in keep][:3]
     if rare and total >= 150:
         out.append(dict(level="info", title="Rarely used apps",
                         text=f"{', '.join(rare)} barely got any clicks in 30 days. Consider unpinning or "
@@ -356,6 +451,12 @@ def build_suggestions(store, rng="30d"):
             out.append(dict(level="good", title="A calmer week",
                             text=f"The last 7 days are {1 - last7 / prev_avg7:.0%} below your usual pace."))
 
+    quiet = [n for n, c, _ in store.keep_info() if c <= 5]
+    if quiet:
+        out.append(dict(level="good", title="Rarely clicked, still important",
+                        text=f"{', '.join(quiet[:3])} barely get clicks, but they are in your recovery inventory, "
+                             "so ClickScope will never suggest removing them. Clicks measure habit, not importance."))
+
     days = max(1, store.days_with_data(rng))
     if total / days >= 6000:
         out.append(dict(level="warn", title="Heavy mouse use",
@@ -366,6 +467,24 @@ def build_suggestions(store, rng="30d"):
         out.append(dict(level="good", title="Nothing stands out",
                         text="Your click activity looks balanced over the last 30 days."))
     return out[:6]
+
+
+def quick_insights(store):
+    """Small early insights shown during the 30-day learning window."""
+    total = store.total("all")
+    if total < 50:
+        return ["First insights appear after about 50 clicks. Use your PC as usual."]
+    apps = store.top("app", "all")
+    out = [f"{apps[0][0]} gets {apps[0][1] / total:.0%} of your clicks so far."]
+    ph = store.busiest_hour("all")
+    if ph is not None:
+        out.append(f"Your busiest hour so far is {fmt_hour(ph)}.")
+    return out
+
+
+def weekly_apps(store):
+    """Apps used regularly (10+ clicks) in the last 7 days, for the weekly check-in."""
+    return [a for a, n in store.top("app", "7d") if n >= 10 and a not in SYSTEM_LABELS][:8]
 
 
 # ---------------------------------------------------------------- demo data

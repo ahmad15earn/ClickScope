@@ -26,7 +26,19 @@ Double-click `ClickScope-Demo.bat` (put it next to `ClickScope.exe`), or use
 can explore every graph and the unlocked suggestions. Your real data is untouched
 and nothing is tracked in demo mode.
 
-## 3. Using ClickScope
+## 3. What's new in this version
+- **Fixed:** the donut chart turning fully pink with many small slices (rings are now drawn as polygons).
+- **Inventory (new tab) and star:** clicks measure habit, not importance. Tap the star next to an app in
+  Overview, answer the weekly check-in, or add an app by name (e.g. your backup tool). Export a
+  recovery checklist (.txt) of what to reinstall first. Kept apps are never suggested for removal.
+- **No dead month:** during the first 30 days you get a weekly check-in ("You used 8 apps regularly this
+  week. Which belong in your recovery inventory?") and early insights. Full suggestions still unlock after
+  30 days AND at least 7 active days.
+- **Back up / restore** your data (Settings), for a new PC or after reinstalling Windows.
+- **Close = keep running:** the X button minimizes; use *Quit ClickScope* in the sidebar to exit.
+- **Ignore list:** right-click a row in Overview to stop counting an app or website.
+
+## 4. Using ClickScope
 - **Overview**: total clicks (with change vs. the previous period), apps used,
   websites, busiest hour, an activity chart (hover for exact numbers) and Most/Least
   lists for apps and websites. Switch Today / 7 days / 30 days / All time.
@@ -41,7 +53,7 @@ and nothing is tracked in demo mode.
   **Pause** stops counting until you press Resume. The green dot pulses on every click.
 - Motion follows Windows: if "Show animations" is off, ClickScope skips the animations.
 
-## 4. Privacy
+## 5. Privacy
 - Counts mouse clicks only. No keystrokes, screenshots, cursor paths or screen content.
 - Saves only daily totals per app / website and per hour of day, in
   `%APPDATA%\ClickScope\clickscope.db`. Nothing is ever sent anywhere.
@@ -49,13 +61,13 @@ and nothing is tracked in demo mode.
   never the URL. Turn this off in Settings if you prefer.
 - Clicks inside ClickScope and software-generated clicks are ignored.
 
-## 5. Known limits
+## 6. Known limits
 - Windows 10/11 only. Apps running as Administrator show as "Other / system".
 - The EXE is unsigned: SmartScreen may warn ("More info > Run anyway") and some
   antivirus tools may flag the mouse hook (false positive). All source is in `src/`.
 - No system-tray icon yet (minimize to the taskbar instead).
 
-## 6. Project layout
+## 7. Project layout
 ```
 src/main.py      entry point (flags: --minimized, --demo)
 src/ui.py        pages: Overview, Graphs, Suggestions, Settings

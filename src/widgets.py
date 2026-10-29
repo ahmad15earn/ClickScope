@@ -32,6 +32,22 @@ def rrect(c, x1, y1, x2, y2, r, **kw):
     return c.create_polygon(pts, smooth=True, **kw)
 
 
+def ring_sector(c, cx, cy, r_mid, thick, a0, a1, fill, tags=()):
+    """Filled ring segment from a0 to a1 (degrees, clockwise from 12 o'clock).
+    Drawn as a polygon because Tk's create_arc misrenders thin slices on Windows."""
+    if a1 - a0 < 0.05:
+        return
+    ro, ri = r_mid + thick / 2, r_mid - thick / 2
+    n = max(2, int((a1 - a0) / 2) + 1)
+    outer, inner = [], []
+    for i in range(n + 1):
+        a = math.radians(a0 + (a1 - a0) * i / n)
+        outer.append((cx + ro * math.sin(a), cy - ro * math.cos(a)))
+        inner.append((cx + ri * math.sin(a), cy - ri * math.cos(a)))
+    pts = [v for p in outer + inner[::-1] for v in p]
+    c.create_polygon(pts, fill=fill, outline=fill, tags=tags)
+
+
 def fmt_k(v):
     v = float(v)
     if v >= 1_000_000:
@@ -82,6 +98,15 @@ def spline(pts, steps=8):
     return out
 
 
+def star_points(cx, cy, r):
+    pts = []
+    for i in range(10):
+        a = math.radians(i * 36 - 90)
+        rad = r if i % 2 == 0 else r * 0.45
+        pts += [cx + rad * math.cos(a), cy + rad * math.sin(a)]
+    return pts
+
+
 def draw_icon(c, kind, cx, cy, col, sz, hole=T.CARD):
     h = sz / 2
     if kind == "overview":
@@ -97,6 +122,8 @@ def draw_icon(c, kind, cx, cy, col, sz, hole=T.CARD):
         for i, f in enumerate((0.5, 1.0, 0.72)):
             x = cx - h + i * (bw + gap)
             rrect(c, x, cy + h - sz * f, x + bw, cy + h, bw / 2, fill=col, outline="")
+    elif kind == "inventory":
+        c.create_polygon(star_points(cx, cy + sz * 0.04, h * 1.08), fill=col, outline=col)
     elif kind == "suggestions":  # sparkle
         pts = []
         for i in range(8):
@@ -394,14 +421,17 @@ class DonutCard(Surface):
         box = (cx - r, cy - r, cx + r, cy + r)
         self.create_oval(*box, outline=T.TRACK, width=thick)
         total = sum(n for _, n in self.slices) or 1
-        start, gap = 90.0, 2.5 if len(self.slices) > 1 else 0
         p = clamp(self.sweep.value, 0, 1)
+        gap = 2.2 if len(self.slices) > 1 else 0
+        a = 0.0
         for i, (name, n) in enumerate(self.slices):
             ext = n / total * 360 * p
             col = T.OTHER if name == "Others" else T.PALETTE[i % len(T.PALETTE)]
-            if ext - gap > 0.4:
-                self.create_arc(*box, start=start - gap / 2, extent=-(ext - gap), style="arc", outline=col, width=thick)
-            start -= ext
+            lo, hi = a + gap / 2, a + ext - gap / 2
+            if hi - lo < 0.6:  # very thin slice: still show a sliver instead of nothing
+                lo, hi = a, a + max(ext, 0.8)
+            ring_sector(self, cx, cy, r, thick, lo, hi, self.fade(col))
+            a += ext
         self.text(cx, cy - T.s(10), f"{self.total:,}", 20, "bold", anchor="center", rise=False)
         self.text(cx, cy + T.s(14), "clicks", 9, fill=T.SUB, anchor="center", rise=False)
         lx = cx + d / 2 + T.s(40)
@@ -419,14 +449,37 @@ class DonutCard(Surface):
 
 # ---------------------------------------------------------------------- list
 class ListCard(Surface):
-    def __init__(self, parent, motion, title, on_mode):
+    def __init__(self, parent, motion, title, on_mode, on_ignore=None, on_keep=None):
         super().__init__(parent, motion)
-        self.title, self.mode, self.on_mode = title, "most", on_mode
+        self.title, self.mode, self.on_mode, self.on_ignore = title, "most", on_mode, on_ignore
+        self.on_keep, self.kept = on_keep, set()
+        self.bind("<Button-3>", self._right_click)
+        self.bind("<ButtonPress-1>", self._left_click)
         self.rows, self.order, self.empty, self.capacity = {}, [], "", 6
         for m in ("most", "least"):
             self.tag_bind("m_" + m, "<ButtonPress-1>", lambda e, m=m: self.set_mode(m))
             self.tag_bind("m_" + m, "<Enter>", lambda e: self.config(cursor="hand2"))
             self.tag_bind("m_" + m, "<Leave>", lambda e: self.config(cursor=""))
+
+    def _row_at(self, y):
+        for name in self.order:
+            ry = self.rows[name]["y"].value
+            if ry - T.s(4) <= y <= ry + T.s(34):
+                return name
+
+    def _left_click(self, e):
+        if self.on_keep and T.s(18) <= e.x <= T.s(46):
+            name = self._row_at(e.y)
+            if name:
+                self.on_keep(name)
+
+    def _right_click(self, e):
+        if not self.on_ignore:
+            return
+        for name in self.order:
+            y = self.rows[name]["y"].value
+            if y - T.s(4) <= e.y <= y + T.s(34):
+                return self.on_ignore(name)
 
     def set_mode(self, m):
         if m != self.mode:
@@ -473,14 +526,22 @@ class ListCard(Surface):
         if not self.order:
             self.text(pad, T.s(70), self.empty, 10, fill=T.SUB, width=self.W - 2 * pad)
             return
+        nx = pad + (T.s(26) if self.on_keep else 0)
+        if self.on_ignore:
+            hint = "Tap the star to keep for recovery  \u00b7  right-click to ignore" if self.on_keep else "Right-click a row to stop counting it"
+            self.text(pad, self.H - T.s(22), hint, 8, fill=T.FAINT, rise=False)
         bar_h = T.s(6)
         for name in sorted(self.order, key=lambda k: self.rows[k]["y"].value):
             st = self.rows[name]
             y = st["y"].value
-            if y + T.s(36) > self.H:
+            if y + T.s(36) > self.H - T.s(26):
                 continue
             nm = name if len(name) <= 30 else name[:29] + "\u2026"
-            self.text(pad, y, nm, 10, anchor="nw")
+            if self.on_keep:
+                on = name in self.kept
+                self.create_polygon(star_points(pad + T.s(8), y + T.s(9), T.s(8)), fill=self.fade(T.AMBER) if on else T.CARD,
+                                    outline=self.fade(T.AMBER if on else T.LINE2), width=T.s(1.5))
+            self.text(nx, y, nm, 10, anchor="nw")
             self.text(self.W - pad, y, f"{int(round(st['n'].value)):,}", 10, "bold", anchor="ne")
             by = y + T.s(24)
             rrect(self, pad, by, self.W - pad, by + bar_h, bar_h / 2, fill=T.TRACK, outline="")
@@ -565,15 +626,18 @@ class PillButton(tk.Canvas):
 
 # ------------------------------------------------------------------- sidebar
 class Sidebar(tk.Canvas):
-    ITEMS = [("overview", "Overview"), ("graphs", "Graphs"), ("suggestions", "Suggestions"), ("settings", "Settings")]
+    ITEMS = [("overview", "Overview"), ("graphs", "Graphs"), ("inventory", "Inventory"),
+             ("suggestions", "Suggestions"), ("settings", "Settings")]
 
-    def __init__(self, parent, motion, on_select, on_pause, logo=None, demo=False):
+    def __init__(self, parent, motion, on_select, on_pause, on_quit=None, logo=None, demo=False):
         super().__init__(parent, bg=T.SIDEBAR, highlightthickness=0, bd=0)
         self.motion, self.on_select, self.logo, self.demo = motion, on_select, logo, demo
         self.active, self.hover, self.paused, self.W, self.H = 0, -1, False, 0, 0
         self.pill = Spring(motion, self, 0.0, response=0.32)
         self.ripple = Spring(motion, self, 1.0, response=0.7, eps=0.004)
         self.btn = PillButton(self, motion, "Pause", on_pause, style="dark", bg=T.SIDEBAR, width=T.s(150), h=T.s(34))
+        self.quit_btn = PillButton(self, motion, "Quit ClickScope", on_quit or (lambda: None), style="soft",
+                                   bg=T.SIDEBAR, width=T.s(150), h=T.s(34))
         self.bind("<Configure>", self._conf)
         self.bind("<Motion>", self._move)
         self.bind("<Leave>", lambda e: self._hover(-1))
@@ -651,7 +715,7 @@ class Sidebar(tk.Canvas):
             self.create_text(T.s(56), cy, text=label, font=T.F(10, "bold" if t > 0.5 else "normal"),
                              fill=mix(T.SUB, T.TEXT, t), anchor="w")
         # status
-        sy = H - T.s(92)
+        sy = H - T.s(136)
         dot = T.AMBER if self.paused else T.GREEN
         dx, r = T.s(28), T.s(5)
         rp = self.ripple.value
@@ -661,4 +725,5 @@ class Sidebar(tk.Canvas):
         self.create_oval(dx - r, sy - r, dx + r, sy + r, fill=dot, outline="")
         self.create_text(T.s(44), sy, text="Paused" if self.paused else "Tracking clicks",
                          font=T.F(9, "bold"), fill=T.SUB, anchor="w")
-        self.create_window(T.s(22), H - T.s(66), window=self.btn, anchor="nw")
+        self.create_window(T.s(22), H - T.s(112), window=self.btn, anchor="nw")
+        self.create_window(T.s(22), H - T.s(66), window=self.quit_btn, anchor="nw")

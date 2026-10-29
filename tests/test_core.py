@@ -58,9 +58,25 @@ def test_30_day_gate():
     s.set("first_run", (datetime.date.today() - datetime.timedelta(days=28)).isoformat())
     assert s.analysis_progress()[0] == 29 and not s.analysis_progress()[1]
     s.set("first_run", (datetime.date.today() - datetime.timedelta(days=30)).isoformat())
-    assert s.analysis_progress()[1]
+    assert not s.analysis_progress()[1]          # 30 days passed but no real activity yet
+    for back in range(7):                        # 7 active days -> unlocked
+        when = datetime.datetime.now() - datetime.timedelta(days=back)
+        for _ in range(25): s.add_click("Word", when=when)
+    assert s.active_days() == 7 and s.analysis_progress()[1]
     s.clear()  # clearing data restarts the learning window
     assert s.analysis_progress()[0] == 1 and not s.analysis_progress()[1]
 
+def test_ignore_list():
+    s = mk()
+    s.add_click("Slack", "Gmail"); s.add_click("Word")
+    s.add_ignore("app", "Slack")
+    s.add_click("Slack"); s.add_click("Word", "Facebook")
+    s.add_ignore("site", "Facebook"); s.add_click("Word", "Facebook")
+    names = [n for n, _ in s.top("app", "all")]
+    assert "Slack" not in names and s.top("site", "all") == [("Gmail", 1)], s.top("site", "all")
+    assert s.total("all") == 3
+    s.clear_ignored(); s.add_click("Slack"); assert s.total("all") == 4
+
+
 if __name__ == "__main__":
-    test_labels(); test_store_and_stats(); test_suggestions(); test_30_day_gate(); print("core tests OK")
+    test_labels(); test_store_and_stats(); test_suggestions(); test_30_day_gate(); test_ignore_list(); print("core tests OK")

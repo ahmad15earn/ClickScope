@@ -5,17 +5,18 @@ import os
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 import theme as T
-from core import ANALYSIS_DAYS, APP_DIR, build_suggestions, fmt_hour, resource_path
+from core import (ANALYSIS_DAYS, APP_DIR, MIN_ACTIVE_DAYS, build_suggestions, fmt_hour, quick_insights,
+                  resource_path, weekly_apps)
 from motion import Motion, Spring, clamp, mix, reduced_motion
 from widgets import (AreaChartCard, BarChartCard, DonutCard, ListCard, PillButton, Segmented,
-                     Sidebar, StatCard, Surface, line_height, measure, rrect)
+                     Sidebar, StatCard, Surface, line_height, measure, ring_sector, rrect, star_points)
 
 RANGES = [("today", "Today"), ("7d", "7 days"), ("30d", "30 days"), ("all", "All time")]
 RANGE_NAME = {"today": "today", "7d": "the last 7 days", "30d": "the last 30 days", "all": "all time"}
-TITLES = {"overview": "Overview", "graphs": "Graphs", "suggestions": "Suggestions", "settings": "Settings"}
+TITLES = {"overview": "Overview", "graphs": "Graphs", "inventory": "Inventory", "suggestions": "Suggestions", "settings": "Settings"}
 HOUR_LABELS = ["12a", "1a", "2a", "3a", "4a", "5a", "6a", "7a", "8a", "9a", "10a", "11a",
                "12p", "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p", "10p", "11p"]
 DAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -138,9 +139,19 @@ class OverviewPage(Page):
         self.s_sites = StatCard(self, m, "Websites")
         self.s_peak = StatCard(self, m, "Busiest hour")
         self.chart = AreaChartCard(self, m, "Activity")
-        self.apps = ListCard(self, m, "Applications", self.update_data)
-        self.sites = ListCard(self, m, "Websites", self.update_data)
+        self.apps = ListCard(self, m, "Applications", self.update_data, lambda n: self._ignore("app", n), self._keep)
+        self.sites = ListCard(self, m, "Websites", self.update_data, lambda n: self._ignore("site", n))
         self.cards = [self.s_total, self.s_apps, self.s_sites, self.s_peak, self.chart, self.apps, self.sites]
+
+    def _keep(self, name):
+        self.app.store.toggle_keep(name)
+        self.update_data()
+
+    def _ignore(self, kind, name):
+        if messagebox.askyesno("ClickScope", f"Stop counting clicks in \u201c{name}\u201d?\n\nIts existing counts are removed too. "
+                                              "You can undo this in Settings > Reset ignore list."):
+            self.app.store.add_ignore(kind, name)
+            self.app.refresh()
 
     def layout(self, w, h):
         P, G = T.s(32), T.s(16)
@@ -150,18 +161,19 @@ class OverviewPage(Page):
         for i, c in enumerate((self.s_total, self.s_apps, self.s_sites, self.s_peak)):
             c.place(x=P + i * (cw + G), y=0, width=cw, height=sh)
         remaining = h - sh - 2 * G - T.s(26)
-        ch = int(clamp(remaining * 0.46, T.s(210), T.s(300)))
+        ch = int(clamp(remaining * 0.40, T.s(200), T.s(280)))
         self.chart.place(x=P, y=sh + G, width=iw, height=ch)
         ly = sh + 2 * G + ch
         lw = (iw - G) // 2
         lh = max(T.s(200), h - ly - T.s(26))
         self.apps.place(x=P, y=ly, width=lw, height=lh)
         self.sites.place(x=P + lw + G, y=ly, width=lw, height=lh)
-        cap = max(3, (lh - T.s(64) - T.s(8)) // T.s(46))
+        cap = max(3, (lh - T.s(64) - T.s(30)) // T.s(46))
         self.apps.capacity = self.sites.capacity = cap
 
     def update_data(self):
         st, r = self.app.store, self.app.rng
+        self.apps.kept = set(st.kept())
         self.s_total.set_number(st.total(r), delta_text(st, r))
         apps, sites = st.top("app", r, 1), st.top("site", r, 1)
         self.s_apps.set_number(st.count("app", r), f"Top: {apps[0][0]}" if apps else "No clicks yet")
@@ -220,12 +232,13 @@ class LearningCard(Surface):
 
     def __init__(self, parent, motion):
         super().__init__(parent, motion)
-        self.day, self.unlock, self.stats = 1, None, (0, 0, 0)
+        self.day, self.unlock = 1, None
+        self.short, self.active = False, 0
         self.ring = Spring(motion, self, 0.0, response=0.9, eps=0.002)
         self.dots = Spring(motion, self, 0.0, response=1.1, eps=0.002)
 
-    def set_progress(self, day, unlock, stats):
-        self.day, self.unlock, self.stats = day, unlock, stats
+    def set_progress(self, day, unlock, short=False, active=0):
+        self.day, self.unlock, self.short, self.active = day, unlock, short, active
         self.ring.to(day / ANALYSIS_DAYS)
         self.dots.to(1)
         self.redraw()
@@ -238,48 +251,46 @@ class LearningCard(Surface):
         self.dots.to(1)
 
     def draw(self):
-        pad = T.s(32)
-        d = min(T.s(190), self.H - T.s(190))
-        thick = T.s(14)
-        cx, cy = pad + d / 2 + T.s(8), pad + d / 2 + T.s(6)
+        pad = T.s(28)
+        d = T.s(118)
+        thick = T.s(12)
+        cx, cy = pad + d / 2 + T.s(6), pad + d / 2 + T.s(2)
         r = d / 2 - thick / 2
-        box = (cx - r, cy - r, cx + r, cy + r)
-        self.create_oval(*box, outline=T.TRACK, width=thick)
-        ext = -360 * clamp(self.ring.value, 0, 1)
-        if abs(ext) > 1:
-            self.create_arc(*box, start=90, extent=ext, style="arc", outline=T.ACCENT, width=thick)
-            a = math.radians(90 + ext)
-            for ex, ey in ((cx + r * math.cos(a), cy - r * math.sin(a)), (cx, cy - r)):  # round caps
-                self.create_oval(ex - thick / 2, ey - thick / 2, ex + thick / 2, ey + thick / 2, fill=T.ACCENT, outline="")
-        self.text(cx, cy - T.s(40), "Day", 10, fill=T.SUB, anchor="center", rise=False)
-        self.text(cx, cy + T.s(2), str(self.day), 34, "bold", anchor="center", rise=False)
-        self.text(cx, cy + T.s(42), f"of {ANALYSIS_DAYS}", 10, fill=T.SUB, anchor="center", rise=False)
+        self.create_oval(cx - r, cy - r, cx + r, cy + r, outline=T.TRACK, width=thick)
+        deg = 360 * clamp(self.ring.value, 0, 1)
+        if deg > 1:
+            ring_sector(self, cx, cy, r, thick, 0, deg, T.ACCENT)
+            for ang in (0, deg):  # round caps
+                a = math.radians(ang)
+                ex, ey = cx + r * math.sin(a), cy - r * math.cos(a)
+                self.create_oval(ex - thick / 2, ey - thick / 2, ex + thick / 2, ey + thick / 2, fill=T.ACCENT, outline=T.ACCENT)
+        self.text(cx, cy - T.s(28), "Day", 9, fill=T.SUB, anchor="center", rise=False)
+        self.text(cx, cy, str(self.day), 28, "bold", anchor="center", rise=False)
+        self.text(cx, cy + T.s(30), f"of {ANALYSIS_DAYS}", 9, fill=T.SUB, anchor="center", rise=False)
 
-        tx = cx + d / 2 + T.s(48)
+        tx = cx + d / 2 + T.s(40)
         tw = self.W - tx - pad
-        self.text(tx, pad, "Learning your habits", 20, "bold")
+        self.text(tx, pad - T.s(2), "Learning your habits", 18, "bold")
         unlock = f"{self.unlock.strftime('%B')} {self.unlock.day}" if self.unlock else ""
-        body = ("ClickScope studies 30 days of your clicks before it suggests anything, so tips come from "
-                "real patterns and not one lucky afternoon. Meanwhile, Overview and Graphs already work.")
-        self.text(tx, pad + T.s(38), body, 10, fill=T.SUB, width=tw)
+        if self.short:
+            body = (f"Day {ANALYSIS_DAYS} is here, but ClickScope has only seen {self.active} active days. "
+                    f"Full suggestions need {MIN_ACTIVE_DAYS} days with real activity.")
+        else:
+            body = ("Full suggestions unlock after 30 days of real patterns. Until then you get weekly check-ins "
+                    "and early insights below, and you can already build your recovery inventory.")
+        self.text(tx, pad + T.s(32), body, 10, fill=T.SUB, width=tw)
         lines = max(1, math.ceil(measure(body, 10) * 1.05 / max(tw, 50)))
-        y = pad + T.s(38) + lines * line_height(10) + T.s(16)
-        label = f"Suggestions unlock on {unlock}"
-        rrect(self, tx, y, tx + measure(label, 10, "bold") + T.s(28), y + T.s(32), T.s(16),
+        y = pad + T.s(32) + lines * line_height(10) + T.s(12)
+        label = (f"Active days so far: {self.active} of {MIN_ACTIVE_DAYS}" if self.short
+                 else f"Full suggestions unlock on {unlock}")
+        rrect(self, tx, y, tx + measure(label, 10, "bold") + T.s(28), y + T.s(30), T.s(15),
               fill=self.fade(T.ACCENT_SOFT), outline="")
-        self.text(tx + T.s(14), y + T.s(16), label, 10, "bold", fill=T.ACCENT_D, anchor="w", bg=T.ACCENT_SOFT)
-        clicks, apps, sites = self.stats
-        sy = y + T.s(54)
-        for i, (val, lab) in enumerate(((clicks, "clicks analyzed"), (apps, "apps seen"), (sites, "websites seen"))):
-            x = tx + i * T.s(150)
-            self.text(x, sy, f"{val:,}", 18, "bold")
-            self.text(x, sy + T.s(28), lab, 9, fill=T.SUB)
+        self.text(tx + T.s(14), y + T.s(15), label, 10, "bold", fill=T.ACCENT_D, anchor="w", bg=T.ACCENT_SOFT)
 
-        gy = self.H - T.s(44)
+        gy = self.H - T.s(26)
         slot = (self.W - 2 * pad) / ANALYSIS_DAYS
-        dr = min(T.s(7), slot * 0.32)
+        dr = min(T.s(6), slot * 0.3)
         shown = self.dots.value * ANALYSIS_DAYS
-        self.text(pad, gy - T.s(34), "Your first 30 days", 9, fill=T.SUB)
         for i in range(ANALYSIS_DAYS):
             x = pad + slot * (i + 0.5)
             if i < self.day - 1 and i < shown:
@@ -289,6 +300,59 @@ class LearningCard(Surface):
                 self.create_oval(x - dr * 0.45, gy - dr * 0.45, x + dr * 0.45, gy + dr * 0.45, fill=T.ACCENT, outline="")
             else:
                 self.create_oval(x - dr, gy - dr, x + dr, gy + dr, fill=T.TRACK, outline="")
+
+
+class CheckinCard(Surface):
+    """Weekly mini report during the learning window, with an interactive question."""
+
+    def __init__(self, parent, motion, on_toggle):
+        super().__init__(parent, motion)
+        self.on_toggle = on_toggle
+        self.week, self.partial, self.insights, self.names, self.kept = 1, True, [], [], set()
+        self.chips = []
+        for i in range(8):
+            self.tag_bind(f"chip{i}", "<ButtonPress-1>", lambda e, i=i: self._chip(i))
+            self.tag_bind(f"chip{i}", "<Enter>", lambda e: self.config(cursor="hand2"))
+            self.tag_bind(f"chip{i}", "<Leave>", lambda e: self.config(cursor=""))
+
+    def set_data(self, day, insights, names, kept):
+        self.week = min(4, (day - 1) // 7 + 1)
+        self.partial = day % 7 != 0
+        self.insights, self.names, self.kept = insights, names, set(kept)
+        self.redraw()
+
+    def _chip(self, i):
+        if i < len(self.names):
+            self.on_toggle(self.names[i])
+
+    def draw(self):
+        pad = T.s(28)
+        self.text(pad, T.s(22), f"Week {self.week} check-in" + ("  \u00b7  so far" if self.partial else ""), 14, "bold")
+        y = T.s(54)
+        for line in self.insights:
+            self.create_oval(pad, y + T.s(6), pad + T.s(6), y + T.s(12), fill=self.fade(T.ACCENT), outline="")
+            self.text(pad + T.s(16), y, line, 10, fill=T.SUB)
+            y += T.s(24)
+        y += T.s(10)
+        q = (f"You used {len(self.names)} apps regularly this week. Which belong in your recovery inventory?"
+             if self.names else "No regularly used apps yet. They will appear here as you work.")
+        self.text(pad, y, q, 10, "bold", width=self.W - 2 * pad)
+        self.text(pad, y + T.s(22), "Rarely clicked apps can matter most when a PC fails, so pick by importance, not by clicks.",
+                  9, fill=T.SUB, width=self.W - 2 * pad)
+        x, cy = pad, y + T.s(70)
+        for i, name in enumerate(self.names):
+            on = name in self.kept
+            nm = name if len(name) <= 22 else name[:21] + "\u2026"
+            wdt = measure(nm, 10, "bold") + T.s(52)
+            if x + wdt > self.W - pad:
+                x, cy = pad, cy + T.s(44)
+            rrect(self, x, cy, x + wdt, cy + T.s(34), T.s(17), fill=self.fade("#FFF4D6" if on else T.TRACK),
+                  outline=self.fade(T.AMBER if on else T.TRACK), tags=f"chip{i}")
+            self.create_polygon(star_points(x + T.s(20), cy + T.s(17), T.s(8)), fill=self.fade(T.AMBER) if on else "",
+                                outline=self.fade(T.AMBER if on else T.FAINT), width=T.s(1.5), tags=f"chip{i}")
+            self.create_text(x + T.s(36), cy + T.s(17), text=nm, font=T.F(10, "bold"), fill=self.fade(T.TEXT),
+                             anchor="w", tags=f"chip{i}")
+            x += wdt + T.s(8)
 
 
 class SuggestionCard(Surface):
@@ -332,16 +396,24 @@ class SuggestionsPage(Page):
     def __init__(self, parent, app):
         super().__init__(parent, app)
         self.learning = LearningCard(self, app.motion)
+        self.checkin = CheckinCard(self, app.motion, self._toggle)
         self.items, self.sig, self.ready = [], None, False
-        self.cards = [self.learning]
+        self.cards = [self.learning, self.checkin]
+
+    def _toggle(self, name):
+        self.app.store.toggle_keep(name)
+        self.update_data()
 
     def layout(self, w, h):
         P, G = T.s(32), T.s(14)
         iw = w - 2 * P
         if not self.ready:
-            self.learning.place(x=P, y=0, width=iw, height=int(clamp(h - T.s(30), T.s(340), T.s(380))))
+            lh = T.s(240)
+            self.learning.place(x=P, y=0, width=iw, height=lh)
+            self.checkin.place(x=P, y=lh + G, width=iw, height=max(T.s(250), h - lh - G - T.s(26)))
             return
         self.learning.place_forget()
+        self.checkin.place_forget()
         y = 0
         for c in self.items:
             ch = SuggestionCard.height_for(c.item, iw)
@@ -362,8 +434,12 @@ class SuggestionsPage(Page):
                 for c in self.items:
                     c.destroy()
                 self.items = []
-            self.ready, self.sig, self.cards = False, None, [self.learning]
-            self.learning.set_progress(day, unlock, (st.total("all"), st.count("app", "all"), st.count("site", "all")))
+            if self.ready or not self.checkin.mapped:
+                self.ready = False
+                self.layout(self.W, self.H)
+            self.ready, self.sig, self.cards = False, None, [self.learning, self.checkin]
+            self.learning.set_progress(day, unlock, day >= ANALYSIS_DAYS, st.active_days())
+            self.checkin.set_data(day, quick_insights(st), weekly_apps(st), st.kept())
             self.layout(self.W, self.H)
             return
         sug = build_suggestions(st, "30d")
@@ -378,6 +454,89 @@ class SuggestionsPage(Page):
         self.layout(self.W, self.H)
         for i, c in enumerate(self.items):
             c.enter(delay=i * 70)
+
+
+class InventoryPage(Page):
+    """Apps the user marked as must-keep. Importance is chosen by the user, not by click counts."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        m = app.motion
+        self.card = Surface(self, m)
+        self.cards = [self.card]
+        self.info = []
+        self.card.draw = self._draw
+        self.card.bind("<ButtonPress-1>", self._click)
+        self.btns = [PillButton(self.card, m, "Add app\u2026", self._add, "dark"),
+                     PillButton(self.card, m, "Export recovery checklist", self._export, "soft")]
+
+    def layout(self, w, h):
+        P = T.s(32)
+        self.card.place(x=P, y=0, width=w - 2 * P, height=h - T.s(26))
+
+    def update_data(self):
+        self.info = self.app.store.keep_info()
+        self.card.redraw()
+
+    def _pitch(self):
+        return T.s(52)
+
+    def _cap(self):
+        return max(1, (self.card.H - T.s(150)) // self._pitch())
+
+    def _click(self, e):
+        if T.s(20) <= e.x <= T.s(56):
+            i = (e.y - T.s(104)) // self._pitch()
+            if 0 <= i < min(len(self.info), self._cap()):
+                self.app.store.toggle_keep(self.info[int(i)][0])
+                self.update_data()
+
+    def _draw(self):
+        c, pad = self.card, T.s(28)
+        c.text(pad, T.s(22), "Recovery inventory", 14, "bold")
+        c.text(pad, T.s(48), "Clicks measure habit, not importance. Mark the apps you must get back first if your PC "
+                              "fails or is reinstalled, even ones you open once a week.", 10, fill=T.SUB, width=c.W - 2 * pad)
+        y0 = T.s(104)
+        if not self.info:
+            c.text(pad, y0 + T.s(10), "Nothing here yet. Tap the \u2605 next to an app in Overview, answer the weekly "
+                                       "check-in, or add an app by name.", 10, fill=T.SUB, width=c.W - 2 * pad)
+        for i, (name, n, last) in enumerate(self.info[: self._cap()]):
+            y = y0 + i * self._pitch()
+            c.create_line(pad, y - T.s(8), c.W - pad, y - T.s(8), fill=T.LINE)
+            c.create_polygon(star_points(pad + T.s(10), y + T.s(14), T.s(10)), fill=c.fade(T.AMBER), outline=c.fade(T.AMBER))
+            c.text(pad + T.s(36), y + T.s(3), name, 11, "bold")
+            if last:
+                ago = (datetime.date.today() - last).days
+                seen = "today" if ago == 0 else f"{ago} day{'s' if ago != 1 else ''} ago"
+                sub = f"{n:,} clicks  \u00b7  last clicked {seen}"
+            else:
+                sub = "Not seen yet  \u00b7  added manually"
+            c.text(pad + T.s(36), y + T.s(24), sub, 9, fill=T.SUB)
+        extra = len(self.info) - self._cap()
+        if extra > 0:
+            c.text(pad, c.H - T.s(92), f"+{extra} more (included in the exported checklist)", 9, fill=T.SUB, anchor="sw")
+        x = pad
+        for b in self.btns:
+            c.create_window(x, c.H - T.s(66), window=b, anchor="nw")
+            x += b.w + T.s(10)
+
+    def _add(self):
+        name = simpledialog.askstring("ClickScope", "App name to add to your recovery inventory\n(for example: your backup tool):")
+        if name and name.strip():
+            st = self.app.store
+            if name.strip() not in st.kept():
+                st.toggle_keep(name.strip())
+            self.update_data()
+
+    def _export(self):
+        path = filedialog.asksaveasfilename(defaultextension=".txt", initialfile="recovery-checklist.txt",
+                                            filetypes=[("Text file", "*.txt")])
+        if path:
+            try:
+                self.app.store.export_inventory(path)
+                messagebox.showinfo("ClickScope", "Checklist saved.")
+            except Exception as e:
+                messagebox.showerror("ClickScope", f"Export failed:\n{e}")
 
 
 class SettingsPage(Page):
@@ -399,15 +558,18 @@ class SettingsPage(Page):
         self.btns = [PillButton(self.data, m, "Export CSV", self._export, "dark"),
                      PillButton(self.data, m, "Open data folder", self._open_folder, "soft"),
                      PillButton(self.data, m, "Preview with sample data", self._demo, "soft"),
+                     PillButton(self.data, m, "Back up data", self._backup, "soft"),
+                     PillButton(self.data, m, "Restore backup", self._restore, "soft"),
+                     PillButton(self.data, m, "Reset ignore list", self._reset_ignore, "soft"),
                      PillButton(self.data, m, "Clear all data", self._clear, "danger")]
 
     def layout(self, w, h):
         P, G = T.s(32), T.s(16)
         iw = w - 2 * P
-        gh, dh = T.s(176), T.s(150)
+        gh, dh = T.s(168), T.s(236)
         self.general.place(x=P, y=0, width=iw, height=gh)
         self.data.place(x=P, y=gh + G, width=iw, height=dh)
-        self.privacy.place(x=P, y=gh + dh + 2 * G, width=iw, height=T.s(176))
+        self.privacy.place(x=P, y=gh + dh + 2 * G, width=iw, height=T.s(160))
 
     def _toggle(self, i):
         self.on[i] = not self.on[i]
@@ -448,6 +610,9 @@ class SettingsPage(Page):
                 x, y = pad, y + T.s(46)
             c.create_window(x, y, window=b, anchor="nw")
             x += b.w + T.s(10)
+        n = len(self.app.store.ignored())
+        tip = (f"{n} ignored. " if n else "") + "Tip: right-click a row in Overview to stop counting an app or website."
+        c.text(pad, c.H - T.s(36), tip, 9, fill=T.SUB, anchor="sw")
         c.text(pad, c.H - T.s(14), f"Saved only on this PC:  {APP_DIR}", 8, fill=T.FAINT, anchor="sw")
 
     def _draw_privacy(self):
@@ -456,8 +621,8 @@ class SettingsPage(Page):
         msg = ("ClickScope only counts mouse clicks. It never records keystrokes, screenshots, cursor movement "
                "or what is on your screen, and it never connects to the internet.\n\n"
                "Only totals are saved: per day, per app and per website. Clicks inside ClickScope are ignored. "
-               "Tracking runs while the app is open, so minimize the window to keep it going in the background; "
-               "closing the window quits it.")
+               "Closing the window keeps ClickScope counting in the background (minimized). "
+               "Use Quit ClickScope in the sidebar to exit completely.")
         c.text(pad, T.s(46), msg, 10, fill=T.SUB, width=c.W - 2 * pad)
 
     def _export(self):
@@ -484,6 +649,31 @@ class SettingsPage(Page):
         except Exception as e:
             messagebox.showerror("ClickScope", f"Could not open demo mode:\n{e}")
 
+    def _backup(self):
+        path = filedialog.asksaveasfilename(defaultextension=".db", initialfile=f"clickscope-backup-{datetime.date.today()}.db",
+                                            filetypes=[("ClickScope backup", "*.db")])
+        if path:
+            try:
+                self.app.store.backup_to(path)
+                messagebox.showinfo("ClickScope", "Backup saved. Keep it somewhere safe, e.g. cloud storage or a USB drive.")
+            except Exception as e:
+                messagebox.showerror("ClickScope", f"Backup failed:\n{e}")
+
+    def _restore(self):
+        path = filedialog.askopenfilename(filetypes=[("ClickScope backup", "*.db")])
+        if path and messagebox.askyesno("ClickScope", "Replace the current data with this backup?\nUse this after reinstalling Windows or on a new PC."):
+            try:
+                self.app.store.restore_from(path)
+                self.app.refresh()
+                messagebox.showinfo("ClickScope", "Backup restored.")
+            except Exception as e:
+                messagebox.showerror("ClickScope", f"Restore failed:\n{e}")
+
+    def _reset_ignore(self):
+        self.app.store.clear_ignored()
+        self.data.redraw()
+        messagebox.showinfo("ClickScope", "Ignore list cleared. Those apps and websites will be counted again.")
+
     def _clear(self):
         if messagebox.askyesno("ClickScope", "Delete all saved click data?\nThe 30-day learning period "
                                               "will also start over. This cannot be undone."):
@@ -493,9 +683,10 @@ class SettingsPage(Page):
 
 # ---------------------------------------------------------------------- app
 class App:
-    def __init__(self, root, store, tracker, demo=False, size=(1120, 740)):
+    def __init__(self, root, store, tracker, demo=False, size=(1120, 740), on_quit=None):
         T.init(root)
         self.root, self.store, self.tracker, self.demo = root, store, tracker, demo
+        self.on_quit = on_quit or root.destroy
         self.rng = "30d" if demo else "today"
         self.tab = "overview"
         self.size = (T.s(size[0]), T.s(size[1]))
@@ -507,7 +698,7 @@ class App:
             self.logo = tk.PhotoImage(file=resource_path("assets/logo_128.png" if T.SCALE >= 1.4 else "assets/logo_64.png"))
         except Exception:
             pass
-        self.sidebar = Sidebar(root, self.motion, self.show, self.toggle_pause, logo=self.logo, demo=demo)
+        self.sidebar = Sidebar(root, self.motion, self.show, self.toggle_pause, self.on_quit, logo=self.logo, demo=demo)
         self.main = tk.Frame(root, bg=T.BG)
         self.header = tk.Canvas(self.main, bg=T.BG, highlightthickness=0, bd=0)
         self.title_reveal = Spring(self.motion, self, 1.0, response=0.5)
@@ -516,6 +707,7 @@ class App:
         self.seg.pos.jump(self.seg.sel)
         self.stage = tk.Frame(self.main, bg=T.BG)
         self.pages = {"overview": OverviewPage(self.stage, self), "graphs": GraphsPage(self.stage, self),
+                      "inventory": InventoryPage(self.stage, self),
                       "suggestions": SuggestionsPage(self.stage, self), "settings": SettingsPage(self.stage, self)}
         self._geom = (0, 0)
         self._last_count, self._dirty, self._last_refresh = getattr(tracker, "click_count", 0), False, 0.0

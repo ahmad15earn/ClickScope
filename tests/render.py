@@ -45,3 +45,20 @@ if __name__ == "__main__":
     app2.show("suggestions"); root2.pump(3); shot(root2, "5_suggestions_learning")
     app2.show("overview"); root2.pump(3); shot(root2, "6_overview_fresh")
     print("rendered to", out)
+
+    # regression: the user's real-world donut (many tiny slices) must show every slice
+    root3, store3, app3 = make(demo=False, seed=False)
+    for n, cnt in (("Firefox", 304), ("Google Chrome", 114), ("File Explorer & Desktop", 43),
+                   ("Start & Taskbar menus", 5), ("Snippingtool", 5), ("Notepad", 4)):
+        for _ in range(cnt): store3.add_click(n)
+    app3.rng = "all"; app3.show("graphs"); root3.pump(3); shot(root3, "7_donut_regression")
+
+    # inventory + keep stars + weekly check-in
+    root4, store4, app4 = make()
+    for n in ("VS Code", "Figma"): store4.toggle_keep(n)
+    store4.toggle_keep("Backup tool")
+    app4.set_range("30d"); app4.show("overview"); root4.pump(2); shot(root4, "8_overview_stars")
+    app4.show("inventory"); root4.pump(2); shot(root4, "9_inventory")
+    for _ in range(40): store2.add_click("Slack")
+    store2.toggle_keep("VS Code")
+    app2.show("suggestions"); root2.pump(3); shot(root2, "5_suggestions_learning")

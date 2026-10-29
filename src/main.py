@@ -76,13 +76,23 @@ def main():
         tracker = Tracker(store)
         tracker.start()
 
-    ui.App(root, store, tracker, demo=demo)
-    if "--minimized" in sys.argv and not demo:
-        root.iconify()
-
-    def on_close():
+    def quit_app():
         tracker.stop()
         root.destroy()
+
+    def on_close():
+        """The X button hides the window so tracking continues; Quit in the sidebar exits."""
+        if demo:
+            return quit_app()
+        if store.get("close_hint") != "1":
+            store.set("close_hint", "1")
+            messagebox.showinfo("ClickScope", "ClickScope keeps counting in the background (minimized to the taskbar).\n\n"
+                                              "To exit completely, use \u201cQuit ClickScope\u201d in the sidebar.")
+        root.iconify()
+
+    ui.App(root, store, tracker, demo=demo, on_quit=quit_app)
+    if "--minimized" in sys.argv and not demo:
+        root.iconify()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()

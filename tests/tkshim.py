@@ -395,6 +395,11 @@ def install():
     font.families = lambda root=None: ["Segoe UI"]
     fd, mb = types.ModuleType("tkinter.filedialog"), types.ModuleType("tkinter.messagebox")
     fd.asksaveasfilename = lambda **k: ""
+    fd.askopenfilename = lambda **k: ""
+    sd = types.ModuleType("tkinter.simpledialog")
+    sd.askstring = lambda *a, **k: None
+    tk.simpledialog = sd
+    sys.modules["tkinter.simpledialog"] = sd
     for n in ("showinfo", "showerror"):
         setattr(mb, n, lambda *a, **k: None)
     mb.askyesno = lambda *a, **k: False
