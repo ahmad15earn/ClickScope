@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS clicks(day TEXT, kind TEXT, name TEXT, n INTEGER,
 CREATE TABLE IF NOT EXISTS hours(day TEXT, hour INTEGER, n INTEGER,
     PRIMARY KEY(day, hour));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS catalog(kind TEXT, name TEXT, detail TEXT, PRIMARY KEY(kind, name));
 """
 
 
@@ -180,6 +181,47 @@ class Store:
         self.set("kept", json.dumps(k))
         return now
 
+    # --- full scanned catalog (everything installed / favourite sites), kept for recovery
+    def set_catalog(self, kind, items):
+        with self.lock:
+            self.db.execute("DELETE FROM catalog WHERE kind=?", (kind,))
+            self.db.executemany("INSERT OR REPLACE INTO catalog(kind,name,detail) VALUES(?,?,?)",
+                                [(kind, n, d) for n, d in items])
+            self.db.commit()
+
+    def catalog(self, kind):
+        with self.lock:
+            return self.db.execute("SELECT name, detail FROM catalog WHERE kind=? ORDER BY lower(name)", (kind,)).fetchall()
+
+    def kept_sites(self):
+        import json
+        try:
+            return list(json.loads(self.get("kept_sites", "[]")))
+        except ValueError:
+            return []
+
+    def toggle_keep_site(self, name, force=None):
+        import json
+        k = self.kept_sites()
+        now = (name not in k) if force is None else force
+        if now and name not in k:
+            k.append(name)
+        elif not now and name in k:
+            k.remove(name)
+        self.set("kept_sites", json.dumps(k))
+        return now
+
+    def set_keep(self, name, on=True):
+        if (name in self.kept()) != on:
+            self.toggle_keep(name)
+
+    def keep_sites_info(self):
+        det = dict(self.catalog("site"))
+        return [(n, det.get(n, "added manually")) for n in self.kept_sites()]
+
+    def reset_first_run(self):
+        self.set("first_run", datetime.date.today().strftime("%Y-%m-%d"))
+
     def keep_info(self):
         """[(name, total_clicks, last_day_or_None)] for every kept app."""
         out = []
@@ -200,9 +242,15 @@ class Store:
             lines.append(f"[ ] {name}  ({n:,} clicks, {seen})")
         if not info:
             lines.append("(nothing marked yet)")
+        sites = self.keep_sites_info()
+        if sites:
+            lines += ["", "Favourite websites to open again:", ""] + [f"[ ] {n}  ({d})" for n, d in sites]
         more = [(a, n) for a, n in self.top("app", "all", 15) if a.lower() not in kept and a not in SYSTEM_LABELS]
         if more:
             lines += ["", "Also used a lot:", ""] + [f"[ ] {a}  ({n:,} clicks)" for a, n in more]
+        rest = [(a, d) for a, d in self.catalog("app") if a.lower() not in kept]
+        if rest:
+            lines += ["", f"Everything else that was installed ({len(rest)}):", ""] + [f"- {a}" + (f"  ({d})" if d else "") for a, d in rest]
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 

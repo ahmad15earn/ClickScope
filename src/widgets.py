@@ -727,3 +727,148 @@ class Sidebar(tk.Canvas):
                          font=T.F(9, "bold"), fill=T.SUB, anchor="w")
         self.create_window(T.s(22), H - T.s(112), window=self.btn, anchor="nw")
         self.create_window(T.s(22), H - T.s(66), window=self.quit_btn, anchor="nw")
+
+
+# ---------------------------------------------------------------- checklist
+class ChecklistCard(Surface):
+    """Scrollable, searchable list with tick boxes (mouse wheel, type-to-search)."""
+    HEAD, FOOT = 96, 78
+
+    def __init__(self, parent, motion, title, on_change=None):
+        super().__init__(parent, motion)
+        self.title, self.subtitle, self.info = title, "", ""
+        self.entries, self.selected, self.locked = [], set(), set()
+        self.query, self.buttons, self.on_change = "", [], on_change
+        self.scroll = Spring(motion, self, 0.0, response=0.22, eps=0.3)
+        self.bind("<MouseWheel>", self._wheel)
+        self.bind("<ButtonPress-1>", self._click)
+        self.bind("<Key>", self._key)
+        self.bind("<Enter>", lambda e: self.focus_set())
+
+    # -- data
+    def set_items(self, items, selected=(), locked=()):
+        """items: [(key, title, sub)]. locked = already in the inventory (shown ticked, not clickable)."""
+        self.entries, self.selected, self.locked = list(items), set(selected), set(locked)
+        self.query = ""
+        self.scroll.jump(0)
+        self.redraw()
+
+    def shown(self):
+        q = self.query.lower().strip()
+        return [it for it in self.entries if q in it[1].lower() or q in (it[2] or "").lower()] if q else self.entries
+
+    def new_selection(self):
+        return [k for k, _, _ in self.entries if k in self.selected and k not in self.locked]
+
+    def select_all_shown(self):
+        keys = {k for k, _, _ in self.shown()} - self.locked
+        self.selected = (self.selected | keys) if not keys <= self.selected else (self.selected - keys)
+        self._changed()
+
+    def _changed(self):
+        self.redraw()
+        if self.on_change:
+            self.on_change()
+
+    # -- geometry
+    def _pitch(self):
+        return T.s(54)
+
+    def _view(self):
+        return T.s(self.HEAD), self.H - T.s(self.FOOT)
+
+    def _max_scroll(self):
+        top, bot = self._view()
+        return max(0, len(self.shown()) * self._pitch() - (bot - top))
+
+    # -- events
+    def _wheel(self, e):
+        step = -(e.delta / 120.0) * self._pitch() * 1.4
+        self.scroll.to(clamp(self.scroll.target + step, 0, self._max_scroll()))
+
+    def _click(self, e):
+        self.focus_set()
+        top, bot = self._view()
+        if not (top <= e.y <= bot):
+            return
+        i = int((e.y - top + self.scroll.value) // self._pitch())
+        rows = self.shown()
+        if 0 <= i < len(rows):
+            key = rows[i][0]
+            if key in self.locked:
+                return
+            self.selected ^= {key}
+            self._changed()
+
+    def _key(self, e):
+        k = getattr(e, "keysym", "")
+        if k == "BackSpace":
+            self.query = self.query[:-1]
+        elif k == "Escape":
+            self.query = ""
+        elif getattr(e, "char", "") and e.char.isprintable() and len(e.char) == 1:
+            self.query += e.char
+        else:
+            return
+        self.scroll.jump(0)
+        self.redraw()
+
+    # -- drawing
+    def _checkbox(self, x, y, on, locked):
+        sz = T.s(22)
+        if on or locked:
+            col = T.FAINT if locked else T.ACCENT
+            rrect(self, x, y, x + sz, y + sz, T.s(7), fill=col, outline=col)
+            self.create_line(x + sz * 0.26, y + sz * 0.54, x + sz * 0.43, y + sz * 0.72, x + sz * 0.76, y + sz * 0.3,
+                             fill="#FFFFFF", width=T.s(2.5), capstyle="round", joinstyle="round")
+        else:
+            rrect(self, x, y, x + sz, y + sz, T.s(7), fill=T.CARD, outline=T.LINE2, width=T.s(1.5))
+
+    def draw(self):
+        pad = T.s(26)
+        top, bot = self._view()
+        rows = self.shown()
+        pitch = self._pitch()
+        for i, (key, title, sub) in enumerate(rows):
+            y = top + i * pitch - self.scroll.value
+            if y + pitch < top or y > bot:
+                continue
+            locked = key in self.locked
+            self.create_line(pad, y + pitch - 1, self.W - pad, y + pitch - 1, fill=T.LINE)
+            self._checkbox(pad, y + (pitch - T.s(22)) / 2, key in self.selected, locked)
+            nm = title if len(title) <= 46 else title[:45] + "\u2026"
+            self.create_text(pad + T.s(38), y + pitch / 2 - (T.s(9) if sub else 0), text=nm, font=T.F(10, "bold"),
+                             fill=T.SUB if locked else T.TEXT, anchor="w")
+            if sub:
+                s2 = sub if len(sub) <= 70 else sub[:69] + "\u2026"
+                self.create_text(pad + T.s(38), y + pitch / 2 + T.s(10), text=s2, font=T.F(9), fill=T.SUB, anchor="w")
+            if locked:
+                self.create_text(self.W - pad - T.s(12), y + pitch / 2, text="In inventory", font=T.F(9), fill=T.FAINT, anchor="e")
+        if not rows:
+            self.create_text(pad, top + T.s(24), text="Nothing found." if not self.query else "No matches.",
+                             font=T.F(10), fill=T.SUB, anchor="w")
+        # header / footer bands hide rows that scroll beneath them
+        self.create_rectangle(T.s(8), 3, self.W - T.s(8), top, fill=T.CARD, outline="")
+        self.create_rectangle(T.s(8), bot, self.W - T.s(8), self.H - 5, fill=T.CARD, outline="")
+        self.create_line(pad, top, self.W - pad, top, fill=T.LINE)
+        self.create_line(pad, bot, self.W - pad, bot, fill=T.LINE)
+        self.text(pad, T.s(22), self.title, 14, "bold")
+        self.text(pad, T.s(50), self.subtitle, 9, fill=T.SUB, width=self.W - 2 * pad - T.s(250))
+        sw = T.s(210)
+        rrect(self, self.W - pad - sw, T.s(20), self.W - pad, T.s(52), T.s(16), fill=T.TRACK, outline="")
+        shown_q = self.query if self.query else "Type to search"
+        self.create_text(self.W - pad - sw + T.s(16), T.s(36), text=shown_q + ("|" if self.query else ""), font=T.F(10),
+                         fill=T.TEXT if self.query else T.FAINT, anchor="w")
+        self.create_text(self.W - pad, T.s(66), text=f"{len(rows)} of {len(self.entries)}", font=T.F(9), fill=T.FAINT, anchor="e")
+        mx = self._max_scroll()
+        if mx > 0:
+            frac = (bot - top) / (len(rows) * pitch)
+            th = max(T.s(30), (bot - top) * frac)
+            ty = top + (bot - top - th) * (self.scroll.value / mx)
+            rrect(self, self.W - T.s(14), ty, self.W - T.s(9), ty + th, T.s(3), fill=T.LINE2, outline="")
+        self.create_text(pad, bot + (self.H - bot) / 2, text=self.info, font=T.F(10, "bold"),
+                         fill=T.TEXT, anchor="w")
+        x = self.W - pad
+        for b in reversed(self.buttons):
+            self.create_window(x, bot + (self.H - bot) / 2, window=b, anchor="e")
+            x -= b.w + T.s(10)

@@ -118,6 +118,19 @@ class Widget:
         return self.root.after_idle(fn)
 
 
+def _noop(self, *a, **k):
+    return None
+
+
+for _n in ("focus_set", "tkraise", "lift", "pack", "grid", "attributes", "overrideredirect", "geometry", "update_idletasks"):
+    setattr(Widget, _n, _noop)
+Widget.winfo_pointerxy = lambda self: (400, 300)
+
+
+class Toplevel(Widget):
+    pass
+
+
 class Frame(Widget):
     pass
 
@@ -389,7 +402,8 @@ class FontObj:
 
 def install():
     tk = types.ModuleType("tkinter")
-    tk.Tk, tk.Frame, tk.Canvas, tk.PhotoImage = Tk, Frame, Canvas, PhotoImage
+    tk.Tk, tk.Frame, tk.Canvas, tk.PhotoImage, tk.Toplevel = Tk, Frame, Canvas, PhotoImage, Toplevel
+    tk.TclError = Exception
     font = types.ModuleType("tkinter.font")
     font.Font = FontObj
     font.families = lambda root=None: ["Segoe UI"]

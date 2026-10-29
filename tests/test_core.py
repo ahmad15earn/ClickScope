@@ -78,5 +78,26 @@ def test_ignore_list():
     s.clear_ignored(); s.add_click("Slack"); assert s.total("all") == 4
 
 
+def test_scanner_and_catalog():
+    import sqlite3, scanner
+    apps = scanner.clean_apps([("Google Chrome", "126.0", "Google LLC"), ("Microsoft Visual C++ 2019 Redistributable (x64)", "14", "MS"),
+                               ("Update for Windows (KB5001234)", "", ""), ("7-Zip", "23.01", "Igor Pavlov"), ("google chrome", "1", ""), ("", "", "")])
+    assert [a for a, _ in apps] == ["7-Zip", "Google Chrome"], apps
+    assert scanner.domain_of("https://www.YouTube.com/watch?v=1") == "youtube.com"
+    assert scanner.domain_of("http://192.168.0.1/x") is None and scanner.domain_of("http://localhost:3000") is None
+    assert scanner.aggregate_domains([("https://github.com/a", 5), ("https://www.github.com/b", 3), ("https://x.org", 1)]) == [("github.com", 8), ("x.org", 1)]
+    d = tempfile.mkdtemp(); db = os.path.join(d, "History")
+    con = sqlite3.connect(db); con.execute("CREATE TABLE urls(url TEXT, visit_count INTEGER)")
+    con.executemany("INSERT INTO urls VALUES(?,?)", [("https://mail.google.com/x", 40), ("https://github.com/me", 22), ("http://localhost/", 99)]); con.commit(); con.close()
+    open(os.path.join(d, "Bookmarks"), "w").write('{"roots":{"bar":{"children":[{"type":"url","url":"https://notion.so/a"}]}}}')
+    sites = scanner.read_sites("chromium", d)
+    assert sites[0] == ("mail.google.com", "40 visits") and ("notion.so", "bookmarked") in sites, sites
+    s = mk(); s.set_catalog("app", apps); s.set_catalog("site", sites)
+    s.toggle_keep("7-Zip"); s.toggle_keep_site("github.com")
+    p = os.path.join(tempfile.mkdtemp(), "r.txt"); s.export_inventory(p)
+    txt = open(p, encoding="utf-8").read()
+    assert "[ ] 7-Zip" in txt and "github.com" in txt and "Everything else" in txt and "Google Chrome" in txt
+
+
 if __name__ == "__main__":
-    test_labels(); test_store_and_stats(); test_suggestions(); test_30_day_gate(); test_ignore_list(); print("core tests OK")
+    test_labels(); test_store_and_stats(); test_suggestions(); test_30_day_gate(); test_ignore_list(); test_scanner_and_catalog(); print("core tests OK")

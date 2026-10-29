@@ -140,6 +140,8 @@ class Tracker:
                 pass
 
     def start(self):
+        if self.running:
+            return
         self.running = True
         threading.Thread(target=self._hook_thread, daemon=True).start()
         threading.Thread(target=self._worker, daemon=True).start()

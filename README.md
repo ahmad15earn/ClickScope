@@ -13,12 +13,14 @@ Light theme, local data, no internet access. Uses your logo (transparent PNG).
    If the hidden `.github` folder doesn't upload, use **Add file > Create new file**,
    name it `.github/workflows/build-windows.yml` and paste in that file's contents.
 3. **Actions** tab > **Build ClickScope EXE** > **Run workflow**.
-4. When it finishes, open the run and download **ClickScope-Windows** (a ZIP with
-   `ClickScope.exe`). Unzip, double-click, done.
+4. When it finishes, open the run and download **ClickScope-Setup** (the installer). Run it:
+   it asks which folder to install to, offers a desktop shortcut and "start with Windows",
+   and adds an uninstaller. **ClickScope-Portable** is the plain `ClickScope.exe` if you prefer.
 
 ### Option B: build on your own PC
 1. Install Python 3.10+ from python.org (tick "Add Python to PATH").
 2. Double-click `build.bat`. Your app appears in `dist\ClickScope.exe`.
+   For the installer too, install Inno Setup 6 (free, jrsoftware.org) first; it appears in `installer_output\`.
 
 ## 2. See it in 10 seconds: demo mode
 Double-click `ClickScope-Demo.bat` (put it next to `ClickScope.exe`), or use
@@ -26,7 +28,17 @@ Double-click `ClickScope-Demo.bat` (put it next to `ClickScope.exe`), or use
 can explore every graph and the unlocked suggestions. Your real data is untouched
 and nothing is tracked in demo mode.
 
-## 3. What's new in this version
+## 3. First run: guided setup
+On first launch a small blue cursor follows your mouse and guides you:
+1. ClickScope scans installed programs (and Start Menu shortcuts) by itself, no folder opening needed.
+2. You tick the apps you can't live without; they go into your recovery inventory.
+3. You choose which browsers it may read, once, locally. It lists your most-visited and bookmarked
+   **domains** and you tick the favourites. (Only domain names are saved.)
+4. A thank-you screen, then click counting starts (and the 30-day learning window with it).
+The full scan is saved too, and **Export recovery checklist** writes everything to a .txt file.
+Re-run any time: Inventory > *Scan this PC*, or Settings > *Run setup guide*.
+
+## 3b. What's new in this version
 - **Fixed:** the donut chart turning fully pink with many small slices (rings are now drawn as polygons).
 - **Inventory (new tab) and star:** clicks measure habit, not importance. Tap the star next to an app in
   Overview, answer the weekly check-in, or add an app by name (e.g. your backup tool). Export a
@@ -74,6 +86,10 @@ src/ui.py        pages: Overview, Graphs, Suggestions, Settings
 src/widgets.py   custom-drawn cards, charts, controls, sidebar
 src/motion.py    spring animation engine (interruptible, reduced-motion aware)
 src/theme.py     colours and fonts
+src/scanner.py   installed-app + browser-favourites scan (local, one-time)
+src/onboarding.py first-run guided setup
+src/guide.py     the blue cursor companion
+installer/       Inno Setup script (folder-choosing installer)
 src/winhook.py   Windows mouse hook + window lookup (ctypes, no dependencies)
 src/core.py      local storage, labeling, suggestion rules, demo data
 assets/          logo.png (transparent), app.ico, UI logos

@@ -74,7 +74,9 @@ def main():
         store = Store()
         store.first_run()  # starts the 30-day learning window on first launch
         tracker = Tracker(store)
-        tracker.start()
+        first_launch = store.get("onboarded") is None
+        if not first_launch:
+            tracker.start()
 
     def quit_app():
         tracker.stop()
@@ -90,8 +92,11 @@ def main():
                                               "To exit completely, use \u201cQuit ClickScope\u201d in the sidebar.")
         root.iconify()
 
-    ui.App(root, store, tracker, demo=demo, on_quit=quit_app)
-    if "--minimized" in sys.argv and not demo:
+    app = ui.App(root, store, tracker, demo=demo, on_quit=quit_app, on_ready=None if demo else tracker.start)
+    if not demo and first_launch:
+        # first run: the guided setup scans the PC; click counting (and the 30 days) start when it ends
+        app.start_setup(first_time=True)
+    elif "--minimized" in sys.argv and not demo:
         root.iconify()
 
     root.protocol("WM_DELETE_WINDOW", on_close)

@@ -457,75 +457,90 @@ class SuggestionsPage(Page):
 
 
 class InventoryPage(Page):
-    """Apps the user marked as must-keep. Importance is chosen by the user, not by click counts."""
+    """Apps and websites the user marked as must-keep. Importance is chosen by the user, not by click counts."""
 
     def __init__(self, parent, app):
         super().__init__(parent, app)
         m = app.motion
+        self.kind = "app"
         self.card = Surface(self, m)
         self.cards = [self.card]
-        self.info = []
+        self.rows = []
         self.card.draw = self._draw
         self.card.bind("<ButtonPress-1>", self._click)
-        self.btns = [PillButton(self.card, m, "Add app\u2026", self._add, "dark"),
+        self.seg = Segmented(self.card, m, [("app", "Apps"), ("site", "Websites")], self._kind,
+                             seg_w=T.s(84), h=T.s(30), bg=T.CARD)
+        self.btns = [PillButton(self.card, m, "Scan this PC", lambda: app.start_setup(False, 1), "accent"),
+                     PillButton(self.card, m, "Add manually\u2026", self._add, "soft"),
                      PillButton(self.card, m, "Export recovery checklist", self._export, "soft")]
+
+    def _kind(self, k):
+        self.kind = k
+        self.update_data()
 
     def layout(self, w, h):
         P = T.s(32)
         self.card.place(x=P, y=0, width=w - 2 * P, height=h - T.s(26))
 
     def update_data(self):
-        self.info = self.app.store.keep_info()
+        st = self.app.store
+        if self.kind == "app":
+            self.rows = [(n, f"{c:,} clicks  \u00b7  last clicked " + (
+                "today" if l == datetime.date.today() else f"{(datetime.date.today() - l).days} days ago")
+                          if l else "Not seen yet  \u00b7  added manually") for n, c, l in st.keep_info()]
+        else:
+            self.rows = st.keep_sites_info()
         self.card.redraw()
 
     def _pitch(self):
         return T.s(52)
 
     def _cap(self):
-        return max(1, (self.card.H - T.s(150)) // self._pitch())
+        return max(1, (self.card.H - T.s(160)) // self._pitch())
 
     def _click(self, e):
         if T.s(20) <= e.x <= T.s(56):
             i = (e.y - T.s(104)) // self._pitch()
-            if 0 <= i < min(len(self.info), self._cap()):
-                self.app.store.toggle_keep(self.info[int(i)][0])
+            if 0 <= i < min(len(self.rows), self._cap()):
+                st, name = self.app.store, self.rows[int(i)][0]
+                st.toggle_keep(name) if self.kind == "app" else st.toggle_keep_site(name)
                 self.update_data()
 
     def _draw(self):
         c, pad = self.card, T.s(28)
         c.text(pad, T.s(22), "Recovery inventory", 14, "bold")
-        c.text(pad, T.s(48), "Clicks measure habit, not importance. Mark the apps you must get back first if your PC "
-                              "fails or is reinstalled, even ones you open once a week.", 10, fill=T.SUB, width=c.W - 2 * pad)
+        c.create_window(c.W - pad, T.s(18), window=self.seg, anchor="ne")
+        c.text(pad, T.s(52), "Clicks measure habit, not importance. Keep the apps and sites you must get back first if your "
+                              "PC fails or is reinstalled, even ones you open once a week.", 10, fill=T.SUB, width=c.W - 2 * pad)
         y0 = T.s(104)
-        if not self.info:
-            c.text(pad, y0 + T.s(10), "Nothing here yet. Tap the \u2605 next to an app in Overview, answer the weekly "
-                                       "check-in, or add an app by name.", 10, fill=T.SUB, width=c.W - 2 * pad)
-        for i, (name, n, last) in enumerate(self.info[: self._cap()]):
+        if not self.rows:
+            msg = ("Nothing here yet. Press Scan this PC to find your installed software and tick what matters, "
+                   "or tap the star next to an app in Overview." if self.kind == "app" else
+                   "No websites yet. Press Scan this PC, choose your browsers, and tick the sites you want to remember.")
+            c.text(pad, y0 + T.s(10), msg, 10, fill=T.SUB, width=c.W - 2 * pad)
+        for i, (name, sub) in enumerate(self.rows[: self._cap()]):
             y = y0 + i * self._pitch()
             c.create_line(pad, y - T.s(8), c.W - pad, y - T.s(8), fill=T.LINE)
             c.create_polygon(star_points(pad + T.s(10), y + T.s(14), T.s(10)), fill=c.fade(T.AMBER), outline=c.fade(T.AMBER))
             c.text(pad + T.s(36), y + T.s(3), name, 11, "bold")
-            if last:
-                ago = (datetime.date.today() - last).days
-                seen = "today" if ago == 0 else f"{ago} day{'s' if ago != 1 else ''} ago"
-                sub = f"{n:,} clicks  \u00b7  last clicked {seen}"
-            else:
-                sub = "Not seen yet  \u00b7  added manually"
             c.text(pad + T.s(36), y + T.s(24), sub, 9, fill=T.SUB)
-        extra = len(self.info) - self._cap()
+        extra = len(self.rows) - self._cap()
         if extra > 0:
-            c.text(pad, c.H - T.s(92), f"+{extra} more (included in the exported checklist)", 9, fill=T.SUB, anchor="sw")
+            c.text(pad, c.H - T.s(84), f"+{extra} more (all included in the exported checklist)", 9, fill=T.SUB, anchor="sw")
         x = pad
         for b in self.btns:
             c.create_window(x, c.H - T.s(66), window=b, anchor="nw")
             x += b.w + T.s(10)
 
     def _add(self):
-        name = simpledialog.askstring("ClickScope", "App name to add to your recovery inventory\n(for example: your backup tool):")
+        what = "app" if self.kind == "app" else "website (for example github.com)"
+        name = simpledialog.askstring("ClickScope", f"Name of the {what} to add to your recovery inventory:")
         if name and name.strip():
             st = self.app.store
-            if name.strip() not in st.kept():
-                st.toggle_keep(name.strip())
+            if self.kind == "app":
+                st.set_keep(name.strip(), True)
+            else:
+                st.toggle_keep_site(name.strip(), True)
             self.update_data()
 
     def _export(self):
@@ -561,12 +576,13 @@ class SettingsPage(Page):
                      PillButton(self.data, m, "Back up data", self._backup, "soft"),
                      PillButton(self.data, m, "Restore backup", self._restore, "soft"),
                      PillButton(self.data, m, "Reset ignore list", self._reset_ignore, "soft"),
+                     PillButton(self.data, m, "Run setup guide", lambda: app.start_setup(False, 0), "soft"),
                      PillButton(self.data, m, "Clear all data", self._clear, "danger")]
 
     def layout(self, w, h):
         P, G = T.s(32), T.s(16)
         iw = w - 2 * P
-        gh, dh = T.s(168), T.s(236)
+        gh, dh = T.s(168), T.s(262)
         self.general.place(x=P, y=0, width=iw, height=gh)
         self.data.place(x=P, y=gh + G, width=iw, height=dh)
         self.privacy.place(x=P, y=gh + dh + 2 * G, width=iw, height=T.s(160))
@@ -619,7 +635,9 @@ class SettingsPage(Page):
         c, pad = self.privacy, T.s(24)
         c.text(pad, T.s(18), "Your privacy", 12, "bold")
         msg = ("ClickScope only counts mouse clicks. It never records keystrokes, screenshots, cursor movement "
-               "or what is on your screen, and it never connects to the internet.\n\n"
+               "or what is on your screen, and it never connects to the internet. Websites are named from the browser tab "
+               "title. If you choose it in the setup guide, it also reads your bookmarks and most-visited domains once; "
+               "only domain names are saved.\n\n"
                "Only totals are saved: per day, per app and per website. Clicks inside ClickScope are ignored. "
                "Closing the window keeps ClickScope counting in the background (minimized). "
                "Use Quit ClickScope in the sidebar to exit completely.")
@@ -683,10 +701,11 @@ class SettingsPage(Page):
 
 # ---------------------------------------------------------------------- app
 class App:
-    def __init__(self, root, store, tracker, demo=False, size=(1120, 740), on_quit=None):
+    def __init__(self, root, store, tracker, demo=False, size=(1120, 740), on_quit=None, on_ready=None):
         T.init(root)
         self.root, self.store, self.tracker, self.demo = root, store, tracker, demo
         self.on_quit = on_quit or root.destroy
+        self.on_ready, self.setup = on_ready, None
         self.rng = "30d" if demo else "today"
         self.tab = "overview"
         self.size = (T.s(size[0]), T.s(size[1]))
@@ -733,7 +752,31 @@ class App:
         self.header.place(x=0, y=0, width=W - sb, height=hh)
         self.stage.place(x=0, y=hh, width=W - sb, height=H - hh)
         self.pages[self.tab].place(x=0, y=0, width=W - sb, height=H - hh)
+        if self.setup is not None:
+            self.setup.place(x=0, y=0, width=W, height=H)
         self.redraw()
+
+    def root_w(self):
+        return self._geom[0] or self.size[0]
+
+    def root_h(self):
+        return self._geom[1] or self.size[1]
+
+    def start_setup(self, first_time=False, start=0, scanner=None):
+        if self.setup is not None:
+            return
+        from onboarding import SetupFlow
+        kw = {"scanner": scanner} if scanner else {}
+        self.setup = SetupFlow(self.root, self, first_time, start, on_done=self._setup_done, **kw)
+        self.setup.start()
+
+    def _setup_done(self, completed, apps, sites):
+        self.setup = None
+        if self.on_ready:
+            self.on_ready()
+            self.on_ready = None
+        self.show("inventory" if (apps or sites) else "overview")
+        self.refresh()
 
     def redraw(self):
         """Redraws the header; App is also the spring owner of the title fade."""

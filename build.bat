@@ -12,6 +12,12 @@ if errorlevel 1 ( echo Could not install PyInstaller. & pause & exit /b 1 )
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name ClickScope ^
   --icon assets\app.ico --add-data "assets;assets" --paths src src\main.py
 if errorlevel 1 ( echo Build failed. & pause & exit /b 1 )
+if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" (
+  "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\ClickScope.iss
+  echo Installer: %~dp0installer_output\ClickScope-Setup.exe
+) else (
+  echo [Optional] Install Inno Setup 6 from jrsoftware.org to also build the folder-choosing installer.
+)
 echo.
 echo Done! Your app is here: %~dp0dist\ClickScope.exe
 pause
