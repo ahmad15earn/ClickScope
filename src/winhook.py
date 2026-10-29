@@ -80,6 +80,7 @@ class Tracker:
         self.q = queue.Queue(maxsize=2000)
         self.paused = False
         self.running = False
+        self.click_count = 0
         self._tid = None
         self._proc = None
 
@@ -134,6 +135,7 @@ class Tracker:
                 app, site = self._resolve(x, y)
                 if app:
                     self.store.add_click(app, site)
+                    self.click_count += 1
             except Exception:
                 pass
 

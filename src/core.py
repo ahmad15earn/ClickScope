@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import threading
 
+ANALYSIS_DAYS = 30
 APP_NAME = "ClickScope"
 APP_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME)
 
@@ -168,6 +169,7 @@ class Store:
         with self.lock:
             self.db.execute("DELETE FROM clicks")
             self.db.execute("DELETE FROM hours")
+            self.db.execute("DELETE FROM settings WHERE key='first_run'")
             self.db.commit()
 
     # --- reading
@@ -178,6 +180,8 @@ class Store:
             return today.strftime("%Y-%m-%d")
         if rng == "7d":
             return (today - datetime.timedelta(days=6)).strftime("%Y-%m-%d")
+        if rng == "30d":
+            return (today - datetime.timedelta(days=29)).strftime("%Y-%m-%d")
         return "0000-00-00"
 
     def total(self, rng):
@@ -224,6 +228,52 @@ class Store:
             return self.db.execute("SELECT COUNT(DISTINCT day) FROM clicks WHERE day>=?",
                                    (self.since(rng),)).fetchone()[0]
 
+    def total_between(self, d1, d2):
+        with self.lock:
+            return self.db.execute(
+                "SELECT COALESCE(SUM(n),0) FROM clicks WHERE kind='app' AND day>=? AND day<=?",
+                (d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d"))).fetchone()[0]
+
+    def daily_series(self, n):
+        """[(date, total)] for the last n days, oldest first, zeros included."""
+        daily = self.daily_totals()
+        today = datetime.date.today()
+        out = []
+        for i in range(n - 1, -1, -1):
+            d = today - datetime.timedelta(days=i)
+            out.append((d, daily.get(d.strftime("%Y-%m-%d"), 0)))
+        return out
+
+    def weekday_totals(self, rng):
+        """Clicks per weekday, Monday first."""
+        out = [0] * 7
+        with self.lock:
+            for w, s in self.db.execute(
+                    "SELECT strftime('%w', day), SUM(n) FROM clicks WHERE kind='app' AND day>=? GROUP BY 1",
+                    (self.since(rng),)):
+                out[(int(w) - 1) % 7] = int(s)
+        return out
+
+    def first_data_day(self):
+        with self.lock:
+            r = self.db.execute("SELECT MIN(day) FROM clicks").fetchone()[0]
+        return datetime.date.fromisoformat(r) if r else None
+
+    # --- the 30-day learning window
+    def first_run(self):
+        v = self.get("first_run")
+        if not v:
+            v = datetime.date.today().strftime("%Y-%m-%d")
+            self.set("first_run", v)
+        return datetime.date.fromisoformat(v)
+
+    def analysis_progress(self):
+        """(day_number 1..30, ready, unlock_date). Suggestions unlock 30 days after first use."""
+        first = self.first_run()
+        elapsed = (datetime.date.today() - first).days
+        return (min(ANALYSIS_DAYS, elapsed + 1), elapsed >= ANALYSIS_DAYS,
+                first + datetime.timedelta(days=ANALYSIS_DAYS))
+
     def export_csv(self, path):
         with self.lock:
             rows = self.db.execute("SELECT day, kind, name, n FROM clicks ORDER BY day, kind, n DESC").fetchall()
@@ -234,32 +284,32 @@ class Store:
 
 
 # -------------------------------------------------------------- suggestions
-def build_suggestions(store, rng):
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def build_suggestions(store, rng="30d"):
+    """Rule-based tips from the last 30 days. Called only once the learning window is over."""
     total = store.total(rng)
     if total < 30:
-        return [dict(level="info", title="Keep ClickScope running",
-                     text="Suggestions appear once there are a few dozen clicks to learn from. "
-                          "Use your PC as usual, then come back, or switch the range to \u201c7 days\u201d.")]
+        return [dict(level="info", title="Not enough activity yet",
+                     text="ClickScope saw very few clicks in the last 30 days, so there is nothing "
+                          "reliable to suggest. Keep it running while you work.")]
     apps = store.top("app", rng)
     sites = store.top("site", rng)
     out = []
 
-    # 1. One app dominates
     name, n = apps[0]
-    share = n / total
-    if share >= 0.35 and len(apps) > 1:
+    if n / total >= 0.35 and len(apps) > 1:
         out.append(dict(level="tip", title=f"{name} is your main workspace",
-                        text=f"{share:.0%} of your clicks happen here. Learning its keyboard shortcuts "
-                             f"(and pinning it to the taskbar) is the quickest way to save clicks."))
+                        text=f"{n / total:.0%} of your clicks happen here. Learning its keyboard shortcuts "
+                             f"and pinning it to the taskbar is the quickest way to save clicks."))
 
-    # 2. Browser-heavy
     browser = sum(c for a, c in apps if a in BROWSER_LABELS)
     if browser / total >= 0.6:
         out.append(dict(level="tip", title="Most of your clicking happens in the browser",
                         text=f"{browser / total:.0%} of clicks. Pin your top tabs, use the bookmarks bar, "
                              "and try Ctrl+L (address bar) and Ctrl+Tab (switch tabs) to click less."))
 
-    # 3. One site dominates
     if sites:
         s_total = sum(c for _, c in sites)
         sname, sn = sites[0]
@@ -268,46 +318,100 @@ def build_suggestions(store, rng):
                             text=f"{sn / s_total:.0%} of your website clicks. Pin it as a tab, or install it as "
                                  "an app window so it is one click away."))
 
-    # 4. Rarely used apps
-    if total >= 150:
-        rare = [a for a, c in reversed(apps)
-                if c <= 3 and c / total <= 0.02 and a not in SYSTEM_LABELS][:3]
-        if rare:
-            out.append(dict(level="info", title="Rarely used apps",
-                            text=f"{', '.join(rare)} barely get any clicks. Consider unpinning or "
-                                 "uninstalling them to declutter your taskbar and Start menu."))
+    rare = [a for a, c in reversed(apps) if c <= 5 and c / total <= 0.02 and a not in SYSTEM_LABELS][:3]
+    if rare and total >= 150:
+        out.append(dict(level="info", title="Rarely used apps",
+                        text=f"{', '.join(rare)} barely got any clicks in 30 days. Consider unpinning or "
+                             "uninstalling them to declutter your taskbar and Start menu."))
 
-    # 5. Many apps
     active = [a for a, c in apps if c >= 10 and a not in SYSTEM_LABELS]
     if len(active) >= 10:
         out.append(dict(level="info", title=f"You juggle {len(active)} apps",
                         text="Try virtual desktops (Win+Ctrl+D) to group apps by task, and Win+Tab to move between them."))
 
-    # 6. Busiest hour
     ph = store.busiest_hour(rng)
     if ph is not None and total >= 100:
         out.append(dict(level="info", title=f"Your busiest hour is {fmt_hour(ph)}",
                         text="Plan demanding, click-heavy work around it, and take a short break right after."))
 
-    # 7. Busier than usual today
-    if rng == "today":
-        today = datetime.date.today().strftime("%Y-%m-%d")
-        daily = store.daily_totals()
-        prev = [v for d, v in daily.items() if d != today]
-        if len(prev) >= 3:
-            avg = sum(prev) / len(prev)
-            if avg > 0 and total >= avg * 1.4:
-                out.append(dict(level="warn", title="Busier than usual today",
-                                text=f"{total:,} clicks vs. a typical {avg:,.0f}. A good moment for a stretch break."))
+    wd = store.weekday_totals(rng)
+    if sum(wd) >= 100:
+        avg = sum(wd) / 7
+        best = max(range(7), key=lambda i: wd[i])
+        if wd[best] >= avg * 1.35:
+            out.append(dict(level="info", title=f"{WEEKDAYS[best]} is your busiest day",
+                            text=f"You click about {wd[best] / avg - 1:.0%} more than on an average day. "
+                                 "Keep it lighter on meetings and admin if you can."))
 
-    # 8. Heavy mouse use
+    daily = store.daily_series(30)
+    last7 = sum(v for _, v in daily[-7:])
+    prev = [v for _, v in daily[:-7]]
+    prev_avg7 = (sum(prev) / len(prev)) * 7 if prev else 0
+    if prev_avg7 > 100:
+        if last7 >= prev_avg7 * 1.25:
+            out.append(dict(level="warn", title="You are clicking more lately",
+                            text=f"The last 7 days are {last7 / prev_avg7 - 1:.0%} above your usual pace. "
+                                 "A good moment to stretch and rest your hand."))
+        elif last7 <= prev_avg7 * 0.75:
+            out.append(dict(level="good", title="A calmer week",
+                            text=f"The last 7 days are {1 - last7 / prev_avg7:.0%} below your usual pace."))
+
     days = max(1, store.days_with_data(rng))
     if total / days >= 6000:
-        out.append(dict(level="warn", title="Heavy mouse day",
-                        text=f"About {total // days:,} clicks per day. Keyboard shortcuts and short breaks "
-                             "can ease the load on your hand."))
+        out.append(dict(level="warn", title="Heavy mouse use",
+                        text=f"About {total // days:,} clicks per active day. Keyboard shortcuts and short "
+                             "breaks can ease the load on your hand."))
 
     if not out:
         out.append(dict(level="good", title="Nothing stands out",
-                        text="Your click activity looks balanced. Check back after a few more days of data."))
-    return out[:5]
+                        text="Your click activity looks balanced over the last 30 days."))
+    return out[:6]
+
+
+# ---------------------------------------------------------------- demo data
+def seed_demo(store):
+    """Fill a throw-away database with 30 days of plausible activity (used by --demo)."""
+    import random
+    rnd = random.Random(7)
+    store.clear()
+    today = datetime.date.today()
+    now = datetime.datetime.now()
+    apps = [("Google Chrome", 62), ("VS Code", 22), ("Slack", 9), ("File Explorer & Desktop", 8),
+            ("Word", 7), ("Figma", 6), ("Terminal", 5), ("Zoom", 3), ("Spotify", 2)]
+    sites = [("YouTube", 46), ("Gmail", 18), ("GitHub", 14), ("ChatGPT", 12), ("Facebook", 8),
+             ("Google Docs", 6), ("Reddit", 4), ("Wikipedia", 3)]
+    hour_w = [0, 0, 0, 0, 0, 0, 1, 3, 7, 10, 11, 9, 5, 7, 10, 11, 10, 8, 5, 4, 5, 4, 2, 1]
+    with store.lock:
+        for back in range(30, -1, -1):
+            d = today - datetime.timedelta(days=back)
+            day = d.strftime("%Y-%m-%d")
+            base = 1900 if d.weekday() < 5 else 800
+            total = base * rnd.uniform(0.7, 1.3) * (1 + (30 - back) * 0.004) * (1.4 if back <= 6 else 1)
+            hw = list(hour_w)
+            if back == 0:
+                hw = [w if h <= max(now.hour, 9) else 0 for h, w in enumerate(hw)]
+                total *= 0.5
+            hs = sum(hw)
+            hour_counts = [int(total * w / hs * rnd.uniform(0.85, 1.15)) for w in hw]
+            day_total = sum(hour_counts)
+            for h, n in enumerate(hour_counts):
+                if n:
+                    store.db.execute("INSERT INTO hours(day,hour,n) VALUES(?,?,?)", (day, h, n))
+            raw = [w * rnd.uniform(0.75, 1.25) for _, w in apps]
+            chrome = 0
+            for (name, _), r in zip(apps, raw):
+                n = int(day_total * r / sum(raw))
+                if n:
+                    store.db.execute("INSERT INTO clicks(day,kind,name,n) VALUES(?,?,?,?)", (day, "app", name, n))
+                if name == "Google Chrome":
+                    chrome = n
+            sraw = [w * rnd.uniform(0.7, 1.3) for _, w in sites]
+            for (name, _), r in zip(sites, sraw):
+                n = int(chrome * 0.9 * r / sum(sraw))
+                if n:
+                    store.db.execute("INSERT INTO clicks(day,kind,name,n) VALUES(?,?,?,?)", (day, "site", name, n))
+        for name, n in (("Paint", 3), ("Calculator", 5), ("Notepad", 4)):  # rarely used apps
+            store.db.execute("INSERT INTO clicks(day,kind,name,n) VALUES(?,?,?,?)",
+                             ((today - datetime.timedelta(days=9)).strftime("%Y-%m-%d"), "app", name, n))
+        store.db.commit()
+    store.set("first_run", (today - datetime.timedelta(days=30)).strftime("%Y-%m-%d"))

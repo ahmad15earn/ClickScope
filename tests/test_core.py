@@ -36,17 +36,31 @@ def test_store_and_stats():
 
 def test_suggestions():
     s = mk()
-    assert build_suggestions(s, "today")[0]["title"] == "Keep ClickScope running"
+    assert build_suggestions(s, "all")[0]["title"] == "Not enough activity yet"
     for _ in range(130): s.add_click("Google Chrome", "YouTube")
     for _ in range(10): s.add_click("Google Chrome", "Gmail")
     for _ in range(10): s.add_click("VS Code")
     for n in ("A","B","C"): s.add_click(n)
     for _ in range(20): s.add_click("Word")
-    titles = [x["title"] for x in build_suggestions(s, "today")]
+    titles = [x["title"] for x in build_suggestions(s, "all")]
     print(titles)
     assert any("browser" in t for t in titles)
     assert any("YouTube" in t for t in titles)
     assert any("Rarely" in t for t in titles)
 
+
+
+def test_30_day_gate():
+    import datetime
+    s = mk()
+    day, ready, unlock = s.analysis_progress()
+    assert day == 1 and not ready
+    s.set("first_run", (datetime.date.today() - datetime.timedelta(days=28)).isoformat())
+    assert s.analysis_progress()[0] == 29 and not s.analysis_progress()[1]
+    s.set("first_run", (datetime.date.today() - datetime.timedelta(days=30)).isoformat())
+    assert s.analysis_progress()[1]
+    s.clear()  # clearing data restarts the learning window
+    assert s.analysis_progress()[0] == 1 and not s.analysis_progress()[1]
+
 if __name__ == "__main__":
-    test_labels(); test_store_and_stats(); test_suggestions(); print("core tests OK")
+    test_labels(); test_store_and_stats(); test_suggestions(); test_30_day_gate(); print("core tests OK")

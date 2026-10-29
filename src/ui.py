@@ -1,46 +1,27 @@
-"""ClickScope UI (Tkinter, light theme only)."""
+"""ClickScope UI: sidebar + pages, spring-animated, light theme only."""
+import datetime
+import math
 import os
+import subprocess
 import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from core import APP_DIR, build_suggestions, fmt_hour, resource_path
+import theme as T
+from core import ANALYSIS_DAYS, APP_DIR, build_suggestions, fmt_hour, resource_path
+from motion import Motion, Spring, clamp, mix, reduced_motion
+from widgets import (AreaChartCard, BarChartCard, DonutCard, ListCard, PillButton, Segmented,
+                     Sidebar, StatCard, Surface, line_height, measure, rrect)
 
-BG = "#F5F8FB"
-CARD = "#FFFFFF"
-BORDER = "#E3EAF0"
-TEXT = "#0F1B2D"
-MUTED = "#64748B"
-TRACK = "#EAF2F7"
-ACCENT = "#00D8F2"
-ACCENT_DARK = "#0891B2"
-GREEN = "#16A34A"
-AMBER = "#D97706"
-LEVEL_COLORS = {"tip": ACCENT, "info": "#94A3B8", "good": "#22C55E", "warn": "#F59E0B"}
-
-FONT = ("Segoe UI", 10)
-FONT_B = ("Segoe UI", 10, "bold")
-FONT_S = ("Segoe UI", 9)
-FONT_H = ("Segoe UI", 11, "bold")
-FONT_T = ("Segoe UI", 18, "bold")
-FONT_N = ("Segoe UI Semibold", 22)
-
-SCALE = 1.0
-
-
-def init_scale(root):
-    global SCALE
-    try:
-        SCALE = max(1.0, root.winfo_fpixels("1i") / 96.0)
-    except Exception:
-        SCALE = 1.0
-
-
-def s(n):
-    return int(round(n * SCALE))
-
-
+RANGES = [("today", "Today"), ("7d", "7 days"), ("30d", "30 days"), ("all", "All time")]
+RANGE_NAME = {"today": "today", "7d": "the last 7 days", "30d": "the last 30 days", "all": "all time"}
+TITLES = {"overview": "Overview", "graphs": "Graphs", "suggestions": "Suggestions", "settings": "Settings"}
+HOUR_LABELS = ["12a", "1a", "2a", "3a", "4a", "5a", "6a", "7a", "8a", "9a", "10a", "11a",
+               "12p", "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p", "10p", "11p"]
+DAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+DAY_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+SIDEBAR_W, HEADER_H = 220, 92
 
 
 def autostart_enabled():
@@ -69,295 +50,422 @@ def set_autostart(on):
                 pass
 
 
-class FlatButton(tk.Label):
-    def __init__(self, parent, text, command, bg=TEXT, fg="#FFFFFF", hover="#1E3350", **kw):
-        super().__init__(parent, text=text, bg=bg, fg=fg, font=FONT_B, padx=s(16), pady=s(7),
-                         cursor="hand2", **kw)
-        self.command, self.base, self.hover = command, bg, hover
-        self.bind("<Button-1>", lambda e: self.command())
-        self.bind("<Enter>", lambda e: self.config(bg=self.hover))
-        self.bind("<Leave>", lambda e: self.config(bg=self.base))
-
-    def restyle(self, text, bg, fg, hover):
-        self.base, self.hover = bg, hover
-        self.config(text=text, bg=bg, fg=fg)
+def day_label(d):
+    return f"{d.day} {d.strftime('%b')}"
 
 
-def card(parent, **kw):
-    return tk.Frame(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1, **kw)
+# ------------------------------------------------------------ data builders
+def activity_series(store, rng):
+    """values, labels, tips, subtitle, indices that get an x label."""
+    now = datetime.datetime.now()
+    if rng == "today":
+        hrs = store.hours("today")
+        n = now.hour + 1
+        vals = hrs[:n] + [None] * (24 - n)
+        tips = [f"{fmt_hour(h)}  \u00b7  {v:,} clicks" if v is not None else "" for h, v in enumerate(vals)]
+        return vals, HOUR_LABELS, tips, "Clicks per hour, today", {h for h in range(24) if h % 3 == 0}
+    if rng in ("7d", "30d"):
+        n = 7 if rng == "7d" else 30
+    else:
+        first = store.first_data_day()
+        n = int(clamp((datetime.date.today() - first).days + 1 if first else 7, 7, 120))
+    series = store.daily_series(n)
+    vals = [v for _, v in series]
+    labels = [DAY_SHORT[d.weekday()] if n <= 7 else day_label(d) for d, _ in series]
+    tips = [f"{d.strftime('%a')}, {day_label(d)}  \u00b7  {v:,} clicks" for d, v in series]
+    step = 1 if n <= 7 else 5 if n <= 30 else -(-n // 6)
+    show = {i for i in range(n) if (n - 1 - i) % step == 0}
+    sub = {"7d": "Clicks per day, last 7 days", "30d": "Clicks per day, last 30 days"}.get(rng, "Clicks per day, all time")
+    return vals, labels, tips, sub, show
 
 
-class ListCard(tk.Frame):
-    """A titled card listing items with proportional bars. Toggle Most / Least."""
+def delta_text(store, rng):
+    today, day = datetime.date.today(), datetime.timedelta
+    if rng == "today":
+        cur, prev, name = store.total("today"), store.total_between(today - day(1), today - day(1)), "yesterday"
+    elif rng == "7d":
+        cur, prev, name = store.total("7d"), store.total_between(today - day(13), today - day(7)), "previous 7 days"
+    elif rng == "30d":
+        cur, prev, name = store.total("30d"), store.total_between(today - day(59), today - day(30)), "previous 30 days"
+    else:
+        return ""
+    if prev <= 0:
+        return ""
+    pct = (cur - prev) / prev * 100
+    if prev < 100 or abs(pct) > 500:  # too little history to compare fairly
+        return ""
+    arrow = "\u2191" if pct >= 0 else "\u2193"
+    return f"{arrow} {abs(pct):.0f}% vs {name}"
 
-    def __init__(self, parent, title, on_mode):
-        super().__init__(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        self.mode, self.on_mode, self.sig = "most", on_mode, None
-        head = tk.Frame(self, bg=CARD)
-        head.pack(fill="x", padx=s(16), pady=(s(14), s(6)))
-        tk.Label(head, text=title, font=FONT_H, fg=TEXT, bg=CARD).pack(side="left")
-        self.btns = {}
-        for m, t in (("least", "Least"), ("most", "Most")):
-            lb = tk.Label(head, text=t, font=FONT_S, cursor="hand2", bg=CARD)
-            lb.pack(side="right", padx=(s(10), 0))
-            lb.bind("<Button-1>", lambda e, m=m: self.set_mode(m))
-            self.btns[m] = lb
-        self.body = tk.Frame(self, bg=CARD)
-        self.body.pack(fill="both", expand=True, padx=s(16), pady=(0, s(12)))
-        self._style()
 
-    def _style(self):
-        for m, lb in self.btns.items():
-            on = m == self.mode
-            lb.config(fg=ACCENT_DARK if on else MUTED, font=FONT_B if on else FONT_S)
+def top_with_others(store, kind, rng, keep=5):
+    rows = store.top(kind, rng)
+    if len(rows) <= keep + 1:
+        return rows
+    return rows[:keep] + [("Others", sum(n for _, n in rows[keep:]))]
 
-    def set_mode(self, m):
-        self.mode = m
-        self._style()
-        self.on_mode()
 
-    def update_rows(self, rows, empty):
-        sig = (tuple(rows), self.mode, empty)
+# -------------------------------------------------------------------- pages
+class Page(tk.Frame):
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=T.BG)
+        self.app, self.cards = app, []
+        self.W = self.H = 0
+        self.bind("<Configure>", self._conf)
+
+    def _conf(self, e):
+        self.W, self.H = e.width, e.height
+        self.layout(e.width, e.height)
+
+    def layout(self, w, h):
+        pass
+
+    def enter(self):
+        for i, c in enumerate(self.cards):
+            c.enter(delay=i * 55)
+        self.update_data()
+
+    def update_data(self):
+        pass
+
+
+class OverviewPage(Page):
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        m = app.motion
+        self.s_total = StatCard(self, m, "Total clicks")
+        self.s_apps = StatCard(self, m, "Apps used")
+        self.s_sites = StatCard(self, m, "Websites")
+        self.s_peak = StatCard(self, m, "Busiest hour")
+        self.chart = AreaChartCard(self, m, "Activity")
+        self.apps = ListCard(self, m, "Applications", self.update_data)
+        self.sites = ListCard(self, m, "Websites", self.update_data)
+        self.cards = [self.s_total, self.s_apps, self.s_sites, self.s_peak, self.chart, self.apps, self.sites]
+
+    def layout(self, w, h):
+        P, G = T.s(32), T.s(16)
+        iw = w - 2 * P
+        cw = (iw - 3 * G) // 4
+        sh = T.s(112)
+        for i, c in enumerate((self.s_total, self.s_apps, self.s_sites, self.s_peak)):
+            c.place(x=P + i * (cw + G), y=0, width=cw, height=sh)
+        remaining = h - sh - 2 * G - T.s(26)
+        ch = int(clamp(remaining * 0.46, T.s(210), T.s(300)))
+        self.chart.place(x=P, y=sh + G, width=iw, height=ch)
+        ly = sh + 2 * G + ch
+        lw = (iw - G) // 2
+        lh = max(T.s(200), h - ly - T.s(26))
+        self.apps.place(x=P, y=ly, width=lw, height=lh)
+        self.sites.place(x=P + lw + G, y=ly, width=lw, height=lh)
+        cap = max(3, (lh - T.s(64) - T.s(8)) // T.s(46))
+        self.apps.capacity = self.sites.capacity = cap
+
+    def update_data(self):
+        st, r = self.app.store, self.app.rng
+        self.s_total.set_number(st.total(r), delta_text(st, r))
+        apps, sites = st.top("app", r, 1), st.top("site", r, 1)
+        self.s_apps.set_number(st.count("app", r), f"Top: {apps[0][0]}" if apps else "No clicks yet")
+        off = st.get("track_sites", "1") != "1"
+        self.s_sites.set_number(st.count("site", r),
+                                f"Top: {sites[0][0]}" if sites else ("Tracking is off" if off else "No clicks yet"))
+        ph = st.busiest_hour(r)
+        self.s_peak.set_label(fmt_hour(ph), "Most clicks" if ph is not None else "No clicks yet")
+        vals, labels, tips, sub, show = activity_series(st, r)
+        self.chart.set_data(vals, labels, tips, sub, show)
+        for kind, card, empty in (
+                ("app", self.apps, "No clicks yet. Use your PC as usual and they will show up here."),
+                ("site", self.sites, "Website tracking is turned off in Settings." if off
+                 else "No website clicks yet. Click around in your browser.")):
+            card.set_rows(st.top(kind, r, card.capacity, desc=(card.mode == "most")), empty)
+
+
+class GraphsPage(Page):
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        m = app.motion
+        self.kind = "app"
+        self.donut = DonutCard(self, m, self._kind)
+        self.week = BarChartCard(self, m, "Busiest days")
+        self.hours = BarChartCard(self, m, "Busiest hours")
+        self.cards = [self.donut, self.week, self.hours]
+
+    def _kind(self, k):
+        self.kind = k
+        self.update_data()
+
+    def layout(self, w, h):
+        P, G = T.s(32), T.s(16)
+        iw = w - 2 * P
+        top_h = int(clamp((h - G - T.s(26)) * 0.5, T.s(230), T.s(330)))
+        dw = int(iw * 0.6)
+        self.donut.place(x=P, y=0, width=dw, height=top_h)
+        self.week.place(x=P + dw + G, y=0, width=iw - dw - G, height=top_h)
+        self.hours.place(x=P, y=top_h + G, width=iw, height=max(T.s(200), h - top_h - G - T.s(26)))
+
+    def update_data(self):
+        st, r = self.app.store, self.app.rng
+        items = top_with_others(st, self.kind, r)
+        total = st.total(r) if self.kind == "app" else sum(n for _, n in st.top("site", r))
+        self.donut.set_items(items, self.kind, total)
+        wd = st.weekday_totals(r)
+        self.week.set_data(wd, DAY_SHORT, [f"{DAY_FULL[i]}  \u00b7  {v:,} clicks" for i, v in enumerate(wd)],
+                           f"Total clicks per weekday, {RANGE_NAME[r]}", set(range(7)))
+        hrs = st.hours(r)
+        self.hours.set_data(hrs, HOUR_LABELS, [f"{fmt_hour(h)}  \u00b7  {v:,} clicks" for h, v in enumerate(hrs)],
+                            f"When you click most, {RANGE_NAME[r]}", {h for h in range(24) if h % 3 == 0})
+
+
+class LearningCard(Surface):
+    """First 30 days: progress ring + 30-day dot calendar."""
+
+    def __init__(self, parent, motion):
+        super().__init__(parent, motion)
+        self.day, self.unlock, self.stats = 1, None, (0, 0, 0)
+        self.ring = Spring(motion, self, 0.0, response=0.9, eps=0.002)
+        self.dots = Spring(motion, self, 0.0, response=1.1, eps=0.002)
+
+    def set_progress(self, day, unlock, stats):
+        self.day, self.unlock, self.stats = day, unlock, stats
+        self.ring.to(day / ANALYSIS_DAYS)
+        self.dots.to(1)
+        self.redraw()
+
+    def enter(self, delay=0):
+        super().enter(delay)
+        self.ring.jump(0)
+        self.dots.jump(0)
+        self.ring.to(self.day / ANALYSIS_DAYS)
+        self.dots.to(1)
+
+    def draw(self):
+        pad = T.s(32)
+        d = min(T.s(190), self.H - T.s(190))
+        thick = T.s(14)
+        cx, cy = pad + d / 2 + T.s(8), pad + d / 2 + T.s(6)
+        r = d / 2 - thick / 2
+        box = (cx - r, cy - r, cx + r, cy + r)
+        self.create_oval(*box, outline=T.TRACK, width=thick)
+        ext = -360 * clamp(self.ring.value, 0, 1)
+        if abs(ext) > 1:
+            self.create_arc(*box, start=90, extent=ext, style="arc", outline=T.ACCENT, width=thick)
+            a = math.radians(90 + ext)
+            for ex, ey in ((cx + r * math.cos(a), cy - r * math.sin(a)), (cx, cy - r)):  # round caps
+                self.create_oval(ex - thick / 2, ey - thick / 2, ex + thick / 2, ey + thick / 2, fill=T.ACCENT, outline="")
+        self.text(cx, cy - T.s(40), "Day", 10, fill=T.SUB, anchor="center", rise=False)
+        self.text(cx, cy + T.s(2), str(self.day), 34, "bold", anchor="center", rise=False)
+        self.text(cx, cy + T.s(42), f"of {ANALYSIS_DAYS}", 10, fill=T.SUB, anchor="center", rise=False)
+
+        tx = cx + d / 2 + T.s(48)
+        tw = self.W - tx - pad
+        self.text(tx, pad, "Learning your habits", 20, "bold")
+        unlock = f"{self.unlock.strftime('%B')} {self.unlock.day}" if self.unlock else ""
+        body = ("ClickScope studies 30 days of your clicks before it suggests anything, so tips come from "
+                "real patterns and not one lucky afternoon. Meanwhile, Overview and Graphs already work.")
+        self.text(tx, pad + T.s(38), body, 10, fill=T.SUB, width=tw)
+        lines = max(1, math.ceil(measure(body, 10) * 1.05 / max(tw, 50)))
+        y = pad + T.s(38) + lines * line_height(10) + T.s(16)
+        label = f"Suggestions unlock on {unlock}"
+        rrect(self, tx, y, tx + measure(label, 10, "bold") + T.s(28), y + T.s(32), T.s(16),
+              fill=self.fade(T.ACCENT_SOFT), outline="")
+        self.text(tx + T.s(14), y + T.s(16), label, 10, "bold", fill=T.ACCENT_D, anchor="w", bg=T.ACCENT_SOFT)
+        clicks, apps, sites = self.stats
+        sy = y + T.s(54)
+        for i, (val, lab) in enumerate(((clicks, "clicks analyzed"), (apps, "apps seen"), (sites, "websites seen"))):
+            x = tx + i * T.s(150)
+            self.text(x, sy, f"{val:,}", 18, "bold")
+            self.text(x, sy + T.s(28), lab, 9, fill=T.SUB)
+
+        gy = self.H - T.s(44)
+        slot = (self.W - 2 * pad) / ANALYSIS_DAYS
+        dr = min(T.s(7), slot * 0.32)
+        shown = self.dots.value * ANALYSIS_DAYS
+        self.text(pad, gy - T.s(34), "Your first 30 days", 9, fill=T.SUB)
+        for i in range(ANALYSIS_DAYS):
+            x = pad + slot * (i + 0.5)
+            if i < self.day - 1 and i < shown:
+                self.create_oval(x - dr, gy - dr, x + dr, gy + dr, fill=T.ACCENT, outline="")
+            elif i == self.day - 1 and i < shown + 1:
+                self.create_oval(x - dr - 2, gy - dr - 2, x + dr + 2, gy + dr + 2, fill=T.CARD, outline=T.ACCENT, width=T.s(2.5))
+                self.create_oval(x - dr * 0.45, gy - dr * 0.45, x + dr * 0.45, gy + dr * 0.45, fill=T.ACCENT, outline="")
+            else:
+                self.create_oval(x - dr, gy - dr, x + dr, gy + dr, fill=T.TRACK, outline="")
+
+
+class SuggestionCard(Surface):
+    def __init__(self, parent, motion, item):
+        super().__init__(parent, motion)
+        self.item = item
+
+    @staticmethod
+    def height_for(item, width):
+        avail = width - T.s(24 + 52 + 24)
+        lines = max(1, math.ceil(measure(item["text"], 10) * 1.06 / max(avail, 60)))
+        return T.s(26) + line_height(12, "bold") + T.s(6) + lines * line_height(10) + T.s(22)
+
+    def draw(self):
+        it, pad = self.item, T.s(24)
+        col = T.LEVEL.get(it["level"], T.ACCENT)
+        cx, cy, rr = pad + T.s(20), pad + T.s(20), T.s(20)
+        self.create_oval(cx - rr, cy - rr, cx + rr, cy + rr, fill=self.fade(mix(T.CARD, col, 0.16)), outline="")
+        c = self.fade(col)
+        if it["level"] == "good":
+            self.create_line(cx - 7, cy, cx - 2, cy + 6, cx + 8, cy - 6, fill=c, width=T.s(3), capstyle="round", joinstyle="round")
+        elif it["level"] == "warn":
+            self.create_line(cx, cy - 8, cx, cy + 2, fill=c, width=T.s(3), capstyle="round")
+            self.create_oval(cx - 2, cy + 6, cx + 2, cy + 10, fill=c, outline="")
+        elif it["level"] == "info":
+            self.create_line(cx, cy - 1, cx, cy + 8, fill=c, width=T.s(3), capstyle="round")
+            self.create_oval(cx - 2, cy - 9, cx + 2, cy - 5, fill=c, outline="")
+        else:
+            pts = []
+            for i in range(8):
+                a = math.radians(i * 45 - 90)
+                rad = T.s(9) if i % 2 == 0 else T.s(3.4)
+                pts += [cx + rad * math.cos(a), cy + rad * math.sin(a)]
+            self.create_polygon(pts, fill=c, outline="")
+        x = pad + T.s(52)
+        self.text(x, pad - T.s(2), it["title"], 12, "bold")
+        self.text(x, pad + line_height(12, "bold") + T.s(4), it["text"], 10, fill=T.SUB, width=self.W - x - pad)
+
+
+class SuggestionsPage(Page):
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        self.learning = LearningCard(self, app.motion)
+        self.items, self.sig, self.ready = [], None, False
+        self.cards = [self.learning]
+
+    def layout(self, w, h):
+        P, G = T.s(32), T.s(14)
+        iw = w - 2 * P
+        if not self.ready:
+            self.learning.place(x=P, y=0, width=iw, height=int(clamp(h - T.s(30), T.s(340), T.s(380))))
+            return
+        self.learning.place_forget()
+        y = 0
+        for c in self.items:
+            ch = SuggestionCard.height_for(c.item, iw)
+            c.place(x=P, y=y, width=iw, height=ch)
+            y += ch + G
+
+    def enter(self):
+        self.sig = None
+        self.update_data()
+        for i, c in enumerate(self.cards):
+            c.enter(delay=i * 70)
+
+    def update_data(self):
+        st = self.app.store
+        day, ready, unlock = st.analysis_progress()
+        if not ready:
+            if self.items:
+                for c in self.items:
+                    c.destroy()
+                self.items = []
+            self.ready, self.sig, self.cards = False, None, [self.learning]
+            self.learning.set_progress(day, unlock, (st.total("all"), st.count("app", "all"), st.count("site", "all")))
+            self.layout(self.W, self.H)
+            return
+        sug = build_suggestions(st, "30d")
+        sig = tuple((i["title"], i["text"]) for i in sug)
         if sig == self.sig:
             return
-        self.sig = sig
-        for w in self.body.winfo_children():
-            w.destroy()
-        if not rows:
-            tk.Label(self.body, text=empty, font=FONT, fg=MUTED, bg=CARD, justify="left",
-                     wraplength=s(330)).pack(anchor="w", pady=s(8))
-            return
-        mx = max(n for _, n in rows) or 1
-        for name, n in rows:
-            r = tk.Frame(self.body, bg=CARD)
-            r.pack(fill="x", pady=s(4))
-            top = tk.Frame(r, bg=CARD)
-            top.pack(fill="x")
-            tk.Label(top, text=name if len(name) <= 30 else name[:29] + "\u2026", font=FONT,
-                     fg=TEXT, bg=CARD, anchor="w").pack(side="left")
-            tk.Label(top, text=f"{n:,}", font=FONT_B, fg=TEXT, bg=CARD).pack(side="right")
-            track = tk.Frame(r, bg=TRACK, height=s(6))
-            track.pack(fill="x", pady=(s(3), 0))
-            track.pack_propagate(False)
-            bar = tk.Frame(track, bg=ACCENT)
-            bar.place(x=0, y=0, relheight=1, relwidth=max(0.03, n / mx))
+        self.sig, self.ready = sig, True
+        for c in self.items:
+            c.destroy()
+        self.items = [SuggestionCard(self, self.app.motion, it) for it in sug]
+        self.cards = list(self.items)
+        self.layout(self.W, self.H)
+        for i, c in enumerate(self.items):
+            c.enter(delay=i * 70)
 
 
-class App:
-    def __init__(self, root, store, tracker):
-        self.root, self.store, self.tracker = root, store, tracker
-        self.rng, self.tab = "today", "overview"
-        self.sug_sig = None
+class SettingsPage(Page):
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        m, st = app.motion, app.store
+        self.general, self.data, self.privacy = Surface(self, m), Surface(self, m), Surface(self, m)
+        self.cards = [self.general, self.data, self.privacy]
+        self.on = [st.get("track_sites", "1") == "1", autostart_enabled()]
+        self.knob = [Spring(m, self.general, 1.0 if v else 0.0, response=0.25) for v in self.on]
+        self.rows = [("Count clicks per website", "Uses the browser tab title to name the site, never the URL."),
+                     ("Start with Windows", "Launches minimized so tracking runs in the background.")]
+        self.general.draw, self.data.draw, self.privacy.draw = self._draw_general, self._draw_data, self._draw_privacy
+        for i in range(2):
+            tag = f"tg{i}"
+            self.general.tag_bind(tag, "<ButtonPress-1>", lambda e, i=i: self._toggle(i))
+            self.general.tag_bind(tag, "<Enter>", lambda e: self.general.config(cursor="hand2"))
+            self.general.tag_bind(tag, "<Leave>", lambda e: self.general.config(cursor=""))
+        self.btns = [PillButton(self.data, m, "Export CSV", self._export, "dark"),
+                     PillButton(self.data, m, "Open data folder", self._open_folder, "soft"),
+                     PillButton(self.data, m, "Preview with sample data", self._demo, "soft"),
+                     PillButton(self.data, m, "Clear all data", self._clear, "danger")]
 
-        self._header()
-        self._nav()
-        self.body = tk.Frame(root, bg=BG)
-        self.body.pack(fill="both", expand=True, padx=s(28), pady=(s(16), s(20)))
-        self.pages = {
-            "overview": self._page_overview(),
-            "suggestions": self._page_suggestions(),
-            "settings": self._page_settings(),
-        }
-        self.show_tab("overview")
-        self.tick()
+    def layout(self, w, h):
+        P, G = T.s(32), T.s(16)
+        iw = w - 2 * P
+        gh, dh = T.s(176), T.s(150)
+        self.general.place(x=P, y=0, width=iw, height=gh)
+        self.data.place(x=P, y=gh + G, width=iw, height=dh)
+        self.privacy.place(x=P, y=gh + dh + 2 * G, width=iw, height=T.s(176))
 
-    # ------------------------------------------------------------- chrome
-    def _header(self):
-        hdr = tk.Frame(self.root, bg=BG)
-        hdr.pack(fill="x", padx=s(28), pady=(s(22), s(10)))
-        logo_file = "assets/logo_80.png" if SCALE >= 1.4 else "assets/logo_40.png"
-        try:
-            self.logo = tk.PhotoImage(file=resource_path(logo_file))
-            tk.Label(hdr, image=self.logo, bg=BG).pack(side="left", padx=(0, s(12)))
-        except Exception:
-            pass
-        t = tk.Frame(hdr, bg=BG)
-        t.pack(side="left")
-        tk.Label(t, text="ClickScope", font=FONT_T, fg=TEXT, bg=BG).pack(anchor="w")
-        tk.Label(t, text="See where your clicks go", font=FONT_S, fg=MUTED, bg=BG).pack(anchor="w")
+    def _toggle(self, i):
+        self.on[i] = not self.on[i]
+        self.knob[i].to(1.0 if self.on[i] else 0.0)
+        if i == 0:
+            self.app.store.set("track_sites", "1" if self.on[0] else "0")
+        else:
+            try:
+                set_autostart(self.on[1])
+            except Exception as e:
+                self.on[1] = not self.on[1]
+                self.knob[1].to(1.0 if self.on[1] else 0.0)
+                messagebox.showerror("ClickScope", f"Could not change the startup setting:\n{e}")
 
-        self.btn_pause = FlatButton(hdr, "Pause", self.toggle_pause)
-        self.btn_pause.pack(side="right")
-        self.status = tk.Label(hdr, text="", font=FONT_B, bg=BG)
-        self.status.pack(side="right", padx=(0, s(16)))
+    def _draw_general(self):
+        c, pad = self.general, T.s(24)
+        c.text(pad, T.s(18), "General", 12, "bold")
+        for i, (title, sub) in enumerate(self.rows):
+            y = T.s(58) + i * T.s(56)
+            if i:
+                c.create_line(pad, y - T.s(10), c.W - pad, y - T.s(10), fill=T.LINE)
+            c.text(pad, y, title, 10, "bold")
+            c.text(pad, y + T.s(20), sub, 9, fill=T.SUB)
+            k = self.knob[i].value
+            tw, th = T.s(46), T.s(28)
+            x2, y1 = c.W - pad, y + T.s(2)
+            rrect(c, x2 - tw, y1, x2, y1 + th, th / 2, fill=mix("#E3E5EA", T.ACCENT, k), outline="", tags=f"tg{i}")
+            kr = th / 2 - T.s(3)
+            kx = x2 - tw + th / 2 + k * (tw - th)
+            c.create_oval(kx - kr, y1 + th / 2 - kr, kx + kr, y1 + th / 2 + kr, fill="#FFFFFF", outline="#DADDE3", tags=f"tg{i}")
 
-    def _nav(self):
-        nav = tk.Frame(self.root, bg=BG)
-        nav.pack(fill="x", padx=s(28))
-        self.tab_widgets = {}
-        for key, label in (("overview", "Overview"), ("suggestions", "Suggestions"), ("settings", "Settings")):
-            f = tk.Frame(nav, bg=BG, cursor="hand2")
-            f.pack(side="left", padx=(0, s(22)))
-            lb = tk.Label(f, text=label, font=FONT_B, bg=BG, cursor="hand2")
-            lb.pack(pady=(s(4), s(6)))
-            ind = tk.Frame(f, bg=BG, height=s(3))
-            ind.pack(fill="x")
-            for w in (f, lb, ind):
-                w.bind("<Button-1>", lambda e, k=key: self.show_tab(k))
-            self.tab_widgets[key] = (lb, ind)
+    def _draw_data(self):
+        c, pad = self.data, T.s(24)
+        c.text(pad, T.s(18), "Your data", 12, "bold")
+        x, y = pad, T.s(54)
+        for b in self.btns:
+            if x + b.w > c.W - pad:
+                x, y = pad, y + T.s(46)
+            c.create_window(x, y, window=b, anchor="nw")
+            x += b.w + T.s(10)
+        c.text(pad, c.H - T.s(14), f"Saved only on this PC:  {APP_DIR}", 8, fill=T.FAINT, anchor="sw")
 
-        seg = tk.Frame(nav, bg=BORDER, padx=1, pady=1)
-        seg.pack(side="right", pady=(0, s(6)))
-        self.seg = {}
-        for key, label in (("today", "Today"), ("7d", "7 days"), ("all", "All time")):
-            lb = tk.Label(seg, text=label, font=FONT_S, padx=s(12), pady=s(4), cursor="hand2")
-            lb.pack(side="left")
-            lb.bind("<Button-1>", lambda e, k=key: self.set_range(k))
-            self.seg[key] = lb
-        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", padx=s(28))
-        self._style_nav()
-
-    def _style_nav(self):
-        for k, (lb, ind) in self.tab_widgets.items():
-            on = k == self.tab
-            lb.config(fg=TEXT if on else MUTED)
-            ind.config(bg=ACCENT if on else BG)
-        for k, lb in self.seg.items():
-            on = k == self.rng
-            lb.config(bg=TEXT if on else CARD, fg="#FFFFFF" if on else MUTED)
-
-    def show_tab(self, key):
-        self.tab = key
-        for k, p in self.pages.items():
-            p.pack_forget()
-        self.pages[key].pack(fill="both", expand=True)
-        self._style_nav()
-        self.sug_sig = None
-        self.refresh()
-
-    def set_range(self, key):
-        self.rng = key
-        self._style_nav()
-        self.sug_sig = None
-        self.refresh()
-
-    def toggle_pause(self):
-        self.tracker.paused = not self.tracker.paused
-        self.refresh()
-
-    # ------------------------------------------------------------ overview
-    def _page_overview(self):
-        page = tk.Frame(self.body, bg=BG)
-        row = tk.Frame(page, bg=BG)
-        row.pack(fill="x")
-        self.stats = {}
-        for i, (key, title) in enumerate((("total", "Total clicks"), ("apps", "Apps used"),
-                                          ("sites", "Websites"), ("peak", "Busiest hour"))):
-            c = card(row)
-            c.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else s(12), 0))
-            row.columnconfigure(i, weight=1, uniform="stat")
-            tk.Label(c, text=title, font=FONT_S, fg=MUTED, bg=CARD).pack(anchor="w", padx=s(16), pady=(s(14), 0))
-            v = tk.Label(c, text="\u2013", font=FONT_N, fg=TEXT, bg=CARD)
-            v.pack(anchor="w", padx=s(16), pady=(0, s(12)))
-            self.stats[key] = v
-
-        lists = tk.Frame(page, bg=BG)
-        lists.pack(fill="both", expand=True, pady=(s(14), 0))
-        lists.columnconfigure(0, weight=1, uniform="lst")
-        lists.columnconfigure(1, weight=1, uniform="lst")
-        lists.rowconfigure(0, weight=1)
-        self.card_apps = ListCard(lists, "Applications", self.refresh)
-        self.card_apps.grid(row=0, column=0, sticky="nsew", padx=(0, s(7)))
-        self.card_sites = ListCard(lists, "Websites", self.refresh)
-        self.card_sites.grid(row=0, column=1, sticky="nsew", padx=(s(7), 0))
-        return page
-
-    def _refresh_overview(self):
-        r = self.rng
-        self.stats["total"].config(text=f"{self.store.total(r):,}")
-        self.stats["apps"].config(text=str(self.store.count("app", r)))
-        self.stats["sites"].config(text=str(self.store.count("site", r)))
-        self.stats["peak"].config(text=fmt_hour(self.store.busiest_hour(r)))
-        for kind, c, empty in (
-                ("app", self.card_apps, "No clicks yet. Use your PC as usual and they will show up here."),
-                ("site", self.card_sites,
-                 "No website clicks yet. Click around in your browser."
-                 if self.store.get("track_sites", "1") == "1" else
-                 "Website tracking is turned off in Settings.")):
-            rows = self.store.top(kind, r, 8, desc=(c.mode == "most"))
-            c.update_rows(rows, empty)
-
-    # --------------------------------------------------------- suggestions
-    def _page_suggestions(self):
-        page = tk.Frame(self.body, bg=BG)
-        self.sug_box = tk.Frame(page, bg=BG)
-        self.sug_box.pack(fill="both", expand=True)
-        return page
-
-    def _refresh_suggestions(self):
-        items = build_suggestions(self.store, self.rng)
-        sig = (self.rng, tuple((i["title"], i["text"]) for i in items))
-        if sig == self.sug_sig:
-            return
-        self.sug_sig = sig
-        for w in self.sug_box.winfo_children():
-            w.destroy()
-        for it in items:
-            c = card(self.sug_box)
-            c.pack(fill="x", pady=(0, s(10)))
-            tk.Frame(c, bg=LEVEL_COLORS.get(it["level"], ACCENT), width=s(5)).pack(side="left", fill="y")
-            inner = tk.Frame(c, bg=CARD)
-            inner.pack(side="left", fill="x", expand=True, padx=s(16), pady=s(12))
-            tk.Label(inner, text=it["title"], font=FONT_H, fg=TEXT, bg=CARD, anchor="w").pack(fill="x")
-            body = tk.Label(inner, text=it["text"], font=FONT, fg=MUTED, bg=CARD, anchor="w", justify="left")
-            body.pack(fill="x", pady=(s(3), 0))
-            body.bind("<Configure>", lambda e, l=body: l.config(wraplength=max(100, e.width - 4)))
-
-    # ------------------------------------------------------------ settings
-    def _page_settings(self):
-        page = tk.Frame(self.body, bg=BG)
-        c = card(page)
-        c.pack(fill="x")
-        inner = tk.Frame(c, bg=CARD)
-        inner.pack(fill="x", padx=s(18), pady=s(14))
-
-        self.var_sites = tk.BooleanVar(value=self.store.get("track_sites", "1") == "1")
-        self.var_auto = tk.BooleanVar(value=autostart_enabled())
-        for var, text, cmd in (
-                (self.var_sites, "Count clicks per website (uses the browser tab title, never the URL)", self._on_sites),
-                (self.var_auto, "Start ClickScope with Windows (starts minimized)", self._on_auto)):
-            tk.Checkbutton(inner, text=text, variable=var, command=cmd, font=FONT, fg=TEXT, bg=CARD,
-                           activebackground=CARD, selectcolor="#FFFFFF", anchor="w", cursor="hand2"
-                           ).pack(fill="x", pady=s(3))
-
-        row = tk.Frame(inner, bg=CARD)
-        row.pack(fill="x", pady=(s(14), 0))
-        FlatButton(row, "Export CSV", self._export, bg=TEXT).pack(side="left")
-        FlatButton(row, "Open data folder", lambda: self._open_folder(), bg=TRACK, fg=TEXT,
-                   hover=BORDER).pack(side="left", padx=s(10))
-        FlatButton(row, "Clear all data", self._clear, bg="#FEE2E2", fg="#B91C1C",
-                   hover="#FECACA").pack(side="left")
-
-        p = card(page)
-        p.pack(fill="x", pady=(s(14), 0))
-        tk.Label(p, text="Your privacy", font=FONT_H, fg=TEXT, bg=CARD).pack(anchor="w", padx=s(18), pady=(s(14), 0))
-        msg = ("ClickScope only counts mouse clicks. It never records keystrokes, screenshots, cursor "
-               "movement, or what is on your screen, and it never connects to the internet.\n\n"
-               "Only totals are saved (per day, per app, per website). Everything stays on this PC in:\n"
-               f"{APP_DIR}\n\nClicks inside ClickScope itself are ignored. "
-               "Tracking only runs while the app is open; minimize it to keep it running in the background.")
-        lb = tk.Label(p, text=msg, font=FONT, fg=MUTED, bg=CARD, justify="left", anchor="w")
-        lb.pack(fill="x", padx=s(18), pady=(s(6), s(14)))
-        lb.bind("<Configure>", lambda e: lb.config(wraplength=max(100, e.width - 4)))
-        return page
-
-    def _on_sites(self):
-        self.store.set("track_sites", "1" if self.var_sites.get() else "0")
-        self.card_sites.sig = None
-
-    def _on_auto(self):
-        try:
-            set_autostart(self.var_auto.get())
-        except Exception as e:
-            self.var_auto.set(not self.var_auto.get())
-            messagebox.showerror("ClickScope", f"Could not change the startup setting:\n{e}")
+    def _draw_privacy(self):
+        c, pad = self.privacy, T.s(24)
+        c.text(pad, T.s(18), "Your privacy", 12, "bold")
+        msg = ("ClickScope only counts mouse clicks. It never records keystrokes, screenshots, cursor movement "
+               "or what is on your screen, and it never connects to the internet.\n\n"
+               "Only totals are saved: per day, per app and per website. Clicks inside ClickScope are ignored. "
+               "Tracking runs while the app is open, so minimize the window to keep it going in the background; "
+               "closing the window quits it.")
+        c.text(pad, T.s(46), msg, 10, fill=T.SUB, width=c.W - 2 * pad)
 
     def _export(self):
         path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="clickscope-export.csv",
                                             filetypes=[("CSV file", "*.csv")])
         if path:
             try:
-                self.store.export_csv(path)
+                self.app.store.export_csv(path)
                 messagebox.showinfo("ClickScope", "Exported successfully.")
             except Exception as e:
                 messagebox.showerror("ClickScope", f"Export failed:\n{e}")
@@ -368,28 +476,129 @@ class App:
         except Exception:
             pass
 
-    def _clear(self):
-        if messagebox.askyesno("ClickScope", "Delete all saved click data? This cannot be undone."):
-            self.store.clear()
-            self.card_apps.sig = self.card_sites.sig = self.sug_sig = None
-            self.refresh()
-
-    # ------------------------------------------------------------ refresh
-    def refresh(self):
-        if self.tracker.paused:
-            self.status.config(text="\u25CF Paused", fg=AMBER)
-            self.btn_pause.restyle("Resume", ACCENT, TEXT, "#4BE6F8")
-        else:
-            self.status.config(text="\u25CF Tracking", fg=GREEN)
-            self.btn_pause.restyle("Pause", TEXT, "#FFFFFF", "#1E3350")
-        if self.tab == "overview":
-            self._refresh_overview()
-        elif self.tab == "suggestions":
-            self._refresh_suggestions()
-
-    def tick(self):
+    def _demo(self):
+        cmd = [sys.executable, "--demo"] if getattr(sys, "frozen", False) else \
+            [sys.executable, os.path.abspath(sys.argv[0]), "--demo"]
         try:
-            self.refresh()
+            subprocess.Popen(cmd)
+        except Exception as e:
+            messagebox.showerror("ClickScope", f"Could not open demo mode:\n{e}")
+
+    def _clear(self):
+        if messagebox.askyesno("ClickScope", "Delete all saved click data?\nThe 30-day learning period "
+                                              "will also start over. This cannot be undone."):
+            self.app.store.clear()
+            self.app.refresh()
+
+
+# ---------------------------------------------------------------------- app
+class App:
+    def __init__(self, root, store, tracker, demo=False, size=(1120, 740)):
+        T.init(root)
+        self.root, self.store, self.tracker, self.demo = root, store, tracker, demo
+        self.rng = "30d" if demo else "today"
+        self.tab = "overview"
+        self.size = (T.s(size[0]), T.s(size[1]))
+        self.motion = Motion(root, enabled=not reduced_motion())
+        root.configure(bg=T.BG)
+
+        self.logo = None
+        try:
+            self.logo = tk.PhotoImage(file=resource_path("assets/logo_128.png" if T.SCALE >= 1.4 else "assets/logo_64.png"))
         except Exception:
             pass
-        self.root.after(1500, self.tick)
+        self.sidebar = Sidebar(root, self.motion, self.show, self.toggle_pause, logo=self.logo, demo=demo)
+        self.main = tk.Frame(root, bg=T.BG)
+        self.header = tk.Canvas(self.main, bg=T.BG, highlightthickness=0, bd=0)
+        self.title_reveal = Spring(self.motion, self, 1.0, response=0.5)
+        self.seg = Segmented(self.main, self.motion, RANGES, self.set_range, seg_w=T.s(78), h=T.s(32), bg=T.BG)
+        self.seg.select(self.rng, silent=True)
+        self.seg.pos.jump(self.seg.sel)
+        self.stage = tk.Frame(self.main, bg=T.BG)
+        self.pages = {"overview": OverviewPage(self.stage, self), "graphs": GraphsPage(self.stage, self),
+                      "suggestions": SuggestionsPage(self.stage, self), "settings": SettingsPage(self.stage, self)}
+        self._geom = (0, 0)
+        self._last_count, self._dirty, self._last_refresh = getattr(tracker, "click_count", 0), False, 0.0
+        root.bind("<Configure>", self._on_root_conf)
+        self.sidebar.set_paused(getattr(tracker, "paused", False))
+        self.layout(*self.size)
+        self.show("overview")
+        self._poll()
+        self._slow()
+
+    # ---- layout
+    def _on_root_conf(self, e):
+        if e.widget is self.root and e.width > 200:
+            self.layout(e.width, e.height)
+
+    def layout(self, W, H):
+        if (W, H) == self._geom:
+            return
+        self._geom = (W, H)
+        sb, hh = T.s(SIDEBAR_W), T.s(HEADER_H)
+        self.sidebar.place(x=0, y=0, width=sb, height=H)
+        self.main.place(x=sb, y=0, width=W - sb, height=H)
+        self.header.place(x=0, y=0, width=W - sb, height=hh)
+        self.stage.place(x=0, y=hh, width=W - sb, height=H - hh)
+        self.pages[self.tab].place(x=0, y=0, width=W - sb, height=H - hh)
+        self.redraw()
+
+    def redraw(self):
+        """Redraws the header; App is also the spring owner of the title fade."""
+        h = self.header
+        h.delete("all")
+        t = clamp(self.title_reveal.value, 0, 1)
+        h.create_text(T.s(32), T.s(50) + (1 - t) * T.s(8), text=TITLES[self.tab], font=T.F(24, "bold"),
+                      fill=mix(T.BG, T.TEXT, t), anchor="w")
+        W = self._geom[0] or self.size[0]
+        if self.tab in ("overview", "graphs"):
+            self.seg.place(x=W - T.s(SIDEBAR_W) - T.s(32) - (self.seg.sw * len(RANGES) + 4), y=T.s(30))
+        else:
+            self.seg.place_forget()
+
+    # ---- navigation
+    def show(self, key):
+        self.tab = key
+        W, H = self._geom if self._geom != (0, 0) else self.size
+        sb, hh = T.s(SIDEBAR_W), T.s(HEADER_H)
+        for k, p in self.pages.items():
+            if k != key:
+                p.place_forget()
+        self.pages[key].place(x=0, y=0, width=W - sb, height=H - hh)
+        self.sidebar.select(key, notify=False)
+        self.title_reveal.jump(0)
+        self.title_reveal.to(1)
+        self.redraw()
+        self.pages[key].enter()
+
+    def set_range(self, key):
+        self.rng = key
+        self.refresh()
+
+    def toggle_pause(self):
+        self.tracker.paused = not self.tracker.paused
+        self.sidebar.set_paused(self.tracker.paused)
+
+    # ---- data refresh
+    def refresh(self):
+        self._last_refresh, self._dirty = self.motion.clock(), False
+        try:
+            self.pages[self.tab].update_data()
+        except Exception:
+            if os.environ.get("CLICKSCOPE_DEBUG"):
+                raise
+
+    def _poll(self):
+        c = getattr(self.tracker, "click_count", 0)
+        if c != self._last_count:
+            self._last_count = c
+            self.sidebar.pulse()
+            self._dirty = True
+        if self._dirty and self.motion.clock() - self._last_refresh > 0.6:
+            self.refresh()
+        self.root.after(150, self._poll)
+
+    def _slow(self):
+        if self.motion.clock() - self._last_refresh > 2.5:
+            self.refresh()
+        self.root.after(3000, self._slow)

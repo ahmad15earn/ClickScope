@@ -1,65 +1,73 @@
-# ClickScope (MVP)
+# ClickScope
 
 Counts how many times you click in each desktop app and website, then shows
-simple stats and suggestions. Counts clicks only, not time. Light theme, local
-data, no internet access.
+statistics, graphs and (after 30 days) suggestions. It counts clicks, not time.
+Light theme, local data, no internet access. Uses your logo (transparent PNG).
 
 ## 1. Get the EXE (pick one)
 
 ### Option A: no tools on your PC (GitHub builds it for you, ~3 minutes)
 1. Make a free account at github.com and create a **new private repository**.
-2. Click **Add file > Upload files**, drag in the *contents* of this ZIP
-   (so `src`, `assets`, `.github` etc. are at the top level) and commit.
-   (If the hidden `.github` folder doesn't upload by dragging, use
-   **Add file > Create new file**, name it `.github/workflows/build-windows.yml`
-   and paste the contents of that file.)
-3. Open the **Actions** tab > **Build ClickScope EXE** > **Run workflow**.
-4. When it finishes, open the run and download **ClickScope-Windows**
-   (a ZIP holding `ClickScope.exe`). Unzip, double-click, done.
+2. **Add file > Upload files**, drag in the *contents* of this ZIP
+   (so `src`, `assets`, `.github` ... are at the top level) and commit.
+   If the hidden `.github` folder doesn't upload, use **Add file > Create new file**,
+   name it `.github/workflows/build-windows.yml` and paste in that file's contents.
+3. **Actions** tab > **Build ClickScope EXE** > **Run workflow**.
+4. When it finishes, open the run and download **ClickScope-Windows** (a ZIP with
+   `ClickScope.exe`). Unzip, double-click, done.
 
 ### Option B: build on your own PC
 1. Install Python 3.10+ from python.org (tick "Add Python to PATH").
-2. Double-click `build.bat`.
-3. Your app appears in `dist\ClickScope.exe`.
+2. Double-click `build.bat`. Your app appears in `dist\ClickScope.exe`.
 
-## 2. Using ClickScope
-- Open `ClickScope.exe`. Tracking starts immediately.
-- **Overview**: total clicks, apps used, websites, busiest hour, plus most/least
-  used apps and websites. Switch between Today / 7 days / All time.
-- **Suggestions**: tips based on your click patterns.
-- **Settings**: website tracking on/off, start with Windows, export CSV,
-  open data folder, clear all data.
-- **Minimize** the window to keep tracking in the background.
-  **Closing** the window quits the app and stops tracking.
-- **Pause** stops counting until you press Resume.
+## 2. See it in 10 seconds: demo mode
+Double-click `ClickScope-Demo.bat` (put it next to `ClickScope.exe`), or use
+**Settings > Preview with sample data**. You get 30 days of sample activity so you
+can explore every graph and the unlocked suggestions. Your real data is untouched
+and nothing is tracked in demo mode.
 
-## 3. Privacy
+## 3. Using ClickScope
+- **Overview**: total clicks (with change vs. the previous period), apps used,
+  websites, busiest hour, an activity chart (hover for exact numbers) and Most/Least
+  lists for apps and websites. Switch Today / 7 days / 30 days / All time.
+- **Graphs**: donut chart of where your clicks go (apps or websites), busiest
+  weekdays, and busiest hours of the day.
+- **Suggestions**: ClickScope first learns from **30 days** of your activity. Until
+  then you see a progress ring ("Day 4 of 30") and the unlock date. After day 30 you
+  get tips based on your last 30 days. *Clear all data* restarts the 30 days.
+- **Settings**: website tracking on/off, start with Windows, export CSV, open data
+  folder, preview with sample data, clear all data.
+- **Minimize** keeps tracking in the background. **Closing** the window quits.
+  **Pause** stops counting until you press Resume. The green dot pulses on every click.
+- Motion follows Windows: if "Show animations" is off, ClickScope skips the animations.
+
+## 4. Privacy
 - Counts mouse clicks only. No keystrokes, screenshots, cursor paths or screen content.
 - Saves only daily totals per app / website and per hour of day, in
-  `%APPDATA%\ClickScope\clickscope.db` (SQLite). Nothing is ever sent anywhere.
-- Websites are guessed from the browser's **tab title** (e.g. "... - YouTube"
-  becomes "YouTube"), never the URL. Known sites get clean names; for unknown
-  pages the last part of the title is used. Turn this off in Settings if you prefer.
-- Clicks inside ClickScope itself and software-generated clicks are ignored.
+  `%APPDATA%\ClickScope\clickscope.db`. Nothing is ever sent anywhere.
+- Websites come from the browser's **tab title** ("... - YouTube" becomes "YouTube"),
+  never the URL. Turn this off in Settings if you prefer.
+- Clicks inside ClickScope and software-generated clicks are ignored.
 
-## 4. Known limits of this MVP
-- Windows 10/11 only. Apps running as Administrator can't be identified and
-  show up as "Other / system" (unless ClickScope is also run as admin).
-- The EXE is unsigned, so Windows SmartScreen may warn on first run
-  ("More info > Run anyway"). Because ClickScope uses a mouse hook, some
-  antivirus tools may also flag it; that is a false positive. You can read every
-  line in `src/`.
+## 5. Known limits
+- Windows 10/11 only. Apps running as Administrator show as "Other / system".
+- The EXE is unsigned: SmartScreen may warn ("More info > Run anyway") and some
+  antivirus tools may flag the mouse hook (false positive). All source is in `src/`.
 - No system-tray icon yet (minimize to the taskbar instead).
 
-## 5. Project layout
+## 6. Project layout
 ```
-src/main.py      app entry point
-src/ui.py        light, minimalist Tkinter interface
+src/main.py      entry point (flags: --minimized, --demo)
+src/ui.py        pages: Overview, Graphs, Suggestions, Settings
+src/widgets.py   custom-drawn cards, charts, controls, sidebar
+src/motion.py    spring animation engine (interruptible, reduced-motion aware)
+src/theme.py     colours and fonts
 src/winhook.py   Windows mouse hook + window lookup (ctypes, no dependencies)
-src/core.py      local storage, labeling, suggestion rules
-assets/          logo + app icon (app.ico)
-tests/           logic tests (python tests/test_core.py)
+src/core.py      local storage, labeling, suggestion rules, demo data
+assets/          logo.png (transparent), app.ico, UI logos
+docs/            preview screenshots
+tests/           python tests/test_core.py ; tests/render.py (headless screenshots)
 build.bat        builds dist\ClickScope.exe
 .github/         optional cloud build (Option A)
 ```
-Run from source without building: `python src\main.py` (Python 3.10+, no extra packages).
+Run from source: `python src\main.py` (Python 3.10+, no extra packages).
