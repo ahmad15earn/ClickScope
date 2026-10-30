@@ -1,22 +1,26 @@
 """ClickScope UI: sidebar + pages, spring-animated, light theme only."""
 import datetime
+import json
 import math
 import os
 import subprocess
 import sys
+import webbrowser
+from urllib.parse import quote
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 
 import theme as T
 from core import (ANALYSIS_DAYS, APP_DIR, MIN_ACTIVE_DAYS, build_suggestions, fmt_hour, quick_insights,
                   resource_path, weekly_apps)
+import recovery as rec
 from motion import Motion, Spring, clamp, mix, reduced_motion
-from widgets import (AreaChartCard, BarChartCard, DonutCard, ListCard, PillButton, Segmented,
+from widgets import (AreaChartCard, BarChartCard, ChecklistCard, DonutCard, ListCard, PillButton, Segmented,
                      Sidebar, StatCard, Surface, line_height, measure, ring_sector, rrect, star_points)
 
 RANGES = [("today", "Today"), ("7d", "7 days"), ("30d", "30 days"), ("all", "All time")]
 RANGE_NAME = {"today": "today", "7d": "the last 7 days", "30d": "the last 30 days", "all": "all time"}
-TITLES = {"overview": "Overview", "graphs": "Graphs", "inventory": "Inventory", "suggestions": "Suggestions", "settings": "Settings"}
+TITLES = {"overview": "Overview", "graphs": "Graphs", "inventory": "Inventory", "recovery": "Recovery", "suggestions": "Suggestions", "settings": "Settings"}
 HOUR_LABELS = ["12a", "1a", "2a", "3a", "4a", "5a", "6a", "7a", "8a", "9a", "10a", "11a",
                "12p", "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p", "10p", "11p"]
 DAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -554,6 +558,248 @@ class InventoryPage(Page):
                 messagebox.showerror("ClickScope", f"Export failed:\n{e}")
 
 
+class RecoveryPage(Page):
+    """Download installers for chosen apps into one folder, in the background, with progress and retry."""
+    STATUS = {rec.QUEUED: (T.FAINT, "Waiting"), rec.RESOLVING: (T.ACCENT, "Looking"), rec.DOWNLOADING: (T.ACCENT, "Downloading"),
+              rec.DONE: (T.GREEN, "Done"), rec.FAILED: (T.RED, "Failed"), rec.NOSOURCE: (T.AMBER, "Manual"),
+              rec.CANCELLED: (T.FAINT, "Cancelled")}
+
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        m, st = app.motion, app.store
+        self.card = Surface(self, m)
+        self.picker = ChecklistCard(self, m, "Choose apps to download")
+        self.cards = [self.card]
+        self.card.draw = self._draw
+        self.mgr, self.picking, self._ticking, self._actions = None, False, False, []
+        self.folder = st.get("recovery_folder", "")
+        self.chosen = self._load_chosen()
+        self.scroll = Spring(m, self.card, 0.0, response=0.22, eps=0.3)
+        self.card.bind("<MouseWheel>", self._wheel)
+        self.card.bind("<ButtonPress-1>", self._click)
+        self.card.bind("<Enter>", lambda e: self.card.focus_set())
+        self.b_apps = PillButton(self.card, m, "Choose apps\u2026", self._pick, "soft")
+        self.b_folder = PillButton(self.card, m, "Choose folder\u2026", self._choose_folder, "soft")
+        self.b_start = PillButton(self.card, m, "Start download", self._start, "accent", width=T.s(210), h=T.s(44))
+        self.b_retry = PillButton(self.card, m, "Retry failed", lambda: self._retry_all(), "dark")
+        self.b_cancel = PillButton(self.card, m, "Cancel", lambda: self.mgr and self.mgr.cancel(), "soft")
+        self.b_open = PillButton(self.card, m, "Open folder", self._open_folder, "soft")
+        self.b_back = PillButton(self.card, m, "New download", self._reset, "soft")
+        self.p_all = PillButton(self.picker, m, "Select all", lambda: self.picker.select_all_shown(), "soft")
+        self.p_cancel = PillButton(self.picker, m, "Cancel", self._pick_cancel, "soft")
+        self.p_done = PillButton(self.picker, m, "Use selected", self._pick_done, "accent")
+        self.picker.buttons = [self.p_all, self.p_cancel, self.p_done]
+
+    # ---- persistence
+    def _load_chosen(self):
+        try:
+            v = json.loads(self.app.store.get("recovery_apps", "null"))
+        except ValueError:
+            v = None
+        return list(v) if v else list(self.app.store.kept())
+
+    def layout(self, w, h):
+        P = T.s(32)
+        self.card.place(x=P, y=0, width=w - 2 * P, height=h - T.s(26))
+        if self.picking:
+            self.picker.place(x=P, y=0, width=w - 2 * P, height=h - T.s(26))
+        else:
+            self.picker.place_forget()
+
+    def update_data(self):
+        if not self.mgr and not self.picking:
+            self.chosen = self._load_chosen()
+        self.card.redraw()
+
+    # ---- choosing
+    def _pick(self):
+        st = self.app.store
+        cat = st.catalog("app")
+        names = {n: d for n, d in cat}
+        for n in set(self.chosen) | set(st.kept()):
+            names.setdefault(n, "From your inventory")
+        if not names:
+            if messagebox.askyesno("ClickScope", "ClickScope has not scanned this PC yet.\nScan your installed apps now?"):
+                self.app.start_setup(False, 1)
+            return
+        items = [(n, n, d) for n, d in sorted(names.items(), key=lambda t: t[0].lower())]
+        self.picker.set_items(items, set(self.chosen))
+        self.picker.title = "Choose apps to download"
+        self.picker.subtitle = "Tick the software you want installers for. Your inventory is pre-selected."
+        self.picker.info = ""
+        self.picking = True
+        self.layout(self.W, self.H)
+        self.picker.enter()
+
+    def _pick_cancel(self):
+        self.picking = False
+        self.layout(self.W, self.H)
+
+    def _pick_done(self):
+        self.chosen = self.picker.new_selection()
+        self.app.store.set("recovery_apps", json.dumps(self.chosen))
+        self._pick_cancel()
+        self.card.redraw()
+
+    def _choose_folder(self):
+        d = filedialog.askdirectory(title="Where should ClickScope save the installers?", mustexist=False)
+        if d:
+            self.folder = d
+            self.app.store.set("recovery_folder", d)
+            self.card.redraw()
+
+    # ---- running
+    def _start(self):
+        if not self.chosen:
+            return messagebox.showinfo("ClickScope", "Choose at least one app first.")
+        if not self.folder:
+            return messagebox.showinfo("ClickScope", "Choose the folder where the installers should be saved.")
+        try:
+            ids = json.loads(self.app.store.get("winget_ids", "{}"))
+        except ValueError:
+            ids = {}
+        self.mgr = rec.RecoveryManager(self.folder, list(self.chosen), ids)
+        self.scroll.jump(0)
+        self.mgr.start()
+        self._start_ticking()
+        self.card.redraw()
+
+    def _retry_all(self):
+        if self.mgr:
+            self.mgr.retry_failed()
+            self._start_ticking()
+
+    def _reset(self):
+        self.mgr = None
+        self.card.redraw()
+
+    def _open_folder(self):
+        try:
+            os.startfile(self.folder)
+        except Exception:
+            pass
+
+    def _start_ticking(self):
+        if not self._ticking:
+            self._ticking = True
+            self._tick()
+
+    def _tick(self):
+        if not self.mgr:
+            self._ticking = False
+            return
+        self.card.redraw()
+        if self.mgr.running:
+            self.app.root.after(350, self._tick)
+        else:
+            self._ticking = False
+            self.app.store.set("winget_ids", json.dumps(self.mgr.ids))
+
+    # ---- events
+    def _max_scroll(self):
+        if not self.mgr:
+            return 0
+        return max(0, len(self.mgr.jobs) * T.s(62) - (self.card.H - T.s(118) - T.s(84)))
+
+    def _wheel(self, e):
+        self.scroll.to(clamp(self.scroll.target - (e.delta / 120.0) * T.s(62) * 1.4, 0, self._max_scroll()))
+
+    def _click(self, e):
+        for y1, y2, job, kind in self._actions:
+            if y1 <= e.y <= y2 and e.x >= self.card.W - T.s(150):
+                if kind == "retry":
+                    self.mgr.retry(job)
+                    self._start_ticking()
+                elif kind == "web":
+                    webbrowser.open("https://www.google.com/search?q=" + quote(job.name + " official download"))
+                elif kind == "open" and job.folder:
+                    try:
+                        os.startfile(job.folder)
+                    except Exception:
+                        pass
+                return
+
+    # ---- drawing
+    def _draw(self):
+        (self._draw_jobs if self.mgr else self._draw_idle)()
+
+    def _step_row(self, c, y, num, title, sub, btn):
+        pad = T.s(28)
+        c.create_oval(pad, y, pad + T.s(30), y + T.s(30), fill=c.fade(T.ACCENT_SOFT), outline="")
+        c.text(pad + T.s(15), y + T.s(15), str(num), 11, "bold", fill=T.ACCENT_D, anchor="center", rise=False, bg=T.ACCENT_SOFT)
+        c.text(pad + T.s(46), y - T.s(2), title, 11, "bold")
+        c.text(pad + T.s(46), y + T.s(20), sub, 9, fill=T.SUB, width=c.W - 2 * pad - T.s(260))
+        c.create_window(c.W - pad, y - T.s(4), window=btn, anchor="ne")
+
+    def _draw_idle(self):
+        c, pad = self.card, T.s(28)
+        c.text(pad, T.s(22), "Software recovery", 14, "bold")
+        c.text(pad, T.s(50), "Pick your software and a folder. ClickScope downloads the official installers one by one in the "
+                              "background, each in its own folder, so you can reinstall everything after a reset.",
+               10, fill=T.SUB, width=c.W - 2 * pad)
+        n = len(self.chosen)
+        self._step_row(c, T.s(124), 1, "Software to recover",
+                       f"{n} app{'s' if n != 1 else ''} selected" if n else "None yet. Choose from your inventory or scan results.", self.b_apps)
+        c.create_line(pad, T.s(176), c.W - pad, T.s(176), fill=T.LINE)
+        self._step_row(c, T.s(196), 2, "Save installers to", self.folder or "No folder chosen yet", self.b_folder)
+        c.create_line(pad, T.s(248), c.W - pad, T.s(248), fill=T.LINE)
+        c.create_window(pad, T.s(272), window=self.b_start, anchor="nw")
+        note = ("How it works: ClickScope asks Windows Package Manager (winget) for each app, so installers come from its "
+                "official, hash-checked repository. Nothing is installed. Paid, Store-only or niche apps have no automatic "
+                "source; they are listed so you can fetch them manually. Failed downloads can be retried with one click.")
+        c.text(pad, T.s(344), note, 9, fill=T.SUB, width=c.W - 2 * pad)
+
+    def _draw_jobs(self):
+        c, pad, mg = self.card, T.s(28), self.mgr
+        jobs, cnt = mg.jobs, mg.counts()
+        pitch, top, bot = T.s(62), T.s(118), c.H - T.s(84)
+        self._actions = []
+        for i, j in enumerate(jobs):
+            y = top + i * pitch - self.scroll.value
+            if y + pitch < top or y > bot:
+                continue
+            col, label = self.STATUS[j.status]
+            c.create_line(pad, y + pitch - 2, c.W - pad, y + pitch - 2, fill=T.LINE)
+            c.create_oval(pad, y + T.s(10), pad + T.s(12), y + T.s(22), fill=c.fade(col), outline="")
+            nm = j.name if len(j.name) <= 40 else j.name[:39] + "\u2026"
+            c.create_text(pad + T.s(26), y + T.s(16), text=nm, font=T.F(10, "bold"), fill=T.TEXT, anchor="w")
+            c.create_text(pad + T.s(26), y + T.s(36), text=j.message[:96], font=T.F(9), fill=T.RED if j.status == rec.FAILED else T.SUB, anchor="w")
+            action = {rec.FAILED: ("Retry", "retry"), rec.CANCELLED: ("Retry", "retry"), rec.NOSOURCE: ("Search web", "web"),
+                      rec.DONE: ("Open", "open")}.get(j.status)
+            if action:
+                c.create_text(c.W - pad - T.s(14), y + T.s(16), text=action[0], font=T.F(10, "bold"), fill=T.ACCENT_D, anchor="e")
+                self._actions.append((y, y + pitch, j, action[1]))
+            else:
+                c.create_text(c.W - pad - T.s(14), y + T.s(16), text=label, font=T.F(9), fill=T.SUB, anchor="e")
+            if j.status in (rec.DOWNLOADING, rec.DONE):
+                bw = c.W - 2 * pad - T.s(150)
+                by = y + T.s(46)
+                rrect(c, pad + T.s(26), by, pad + T.s(26) + bw, by + T.s(5), T.s(2.5), fill=T.TRACK, outline="")
+                rrect(c, pad + T.s(26), by, pad + T.s(26) + max(T.s(5), bw * j.progress), by + T.s(5), T.s(2.5),
+                      fill=c.fade(T.GREEN if j.status == rec.DONE else T.ACCENT), outline="")
+        c.create_rectangle(T.s(8), 3, c.W - T.s(8), top - 2, fill=T.CARD, outline="")
+        c.create_rectangle(T.s(8), bot, c.W - T.s(8), c.H - 5, fill=T.CARD, outline="")
+        c.create_line(pad, bot, c.W - pad, bot, fill=T.LINE)
+        done, total = cnt.get(rec.DONE, 0), len(jobs)
+        c.text(pad, T.s(22), "Downloading your software" if mg.running else "Recovery finished", 14, "bold")
+        bits = [f"{done} of {total} downloaded"] + [f"{cnt[k]} {w}" for k, w in ((rec.FAILED, "failed"), (rec.NOSOURCE, "need manual download"))
+                                                     if cnt.get(k)]
+        c.text(pad, T.s(50), "  \u00b7  ".join(bits), 10, fill=T.SUB)
+        frac = sum(1.0 if j.status in (rec.DONE, rec.NOSOURCE, rec.FAILED, rec.CANCELLED) else j.progress for j in jobs) / max(total, 1)
+        rrect(c, pad, T.s(82), c.W - pad, T.s(90), T.s(4), fill=T.TRACK, outline="")
+        rrect(c, pad, T.s(82), pad + max(T.s(8), (c.W - 2 * pad) * frac), T.s(90), T.s(4), fill=c.fade(T.ACCENT), outline="")
+        x, by = pad, bot + T.s(20)
+        btns = ([self.b_cancel] if mg.running else [self.b_back]) + ([self.b_retry] if (cnt.get(rec.FAILED) or cnt.get(rec.CANCELLED)) else []) + [self.b_open]
+        for b in sorted(btns, key=lambda b: b is not self.b_retry):
+            c.create_window(x, by, window=b, anchor="nw")
+            x += b.w + T.s(10)
+        mx = self._max_scroll()
+        if mx > 0:
+            th = max(T.s(30), (bot - top) * (bot - top) / (len(jobs) * pitch))
+            ty = top + (bot - top - th) * (self.scroll.value / mx)
+            rrect(c, c.W - T.s(14), ty, c.W - T.s(9), ty + th, T.s(3), fill=T.LINE2, outline="")
+
+
 class SettingsPage(Page):
     def __init__(self, parent, app):
         super().__init__(parent, app)
@@ -577,12 +823,13 @@ class SettingsPage(Page):
                      PillButton(self.data, m, "Restore backup", self._restore, "soft"),
                      PillButton(self.data, m, "Reset ignore list", self._reset_ignore, "soft"),
                      PillButton(self.data, m, "Run setup guide", lambda: app.start_setup(False, 0), "soft"),
+                     PillButton(self.data, m, "Replay tour", lambda: app.start_tour(), "soft"),
                      PillButton(self.data, m, "Clear all data", self._clear, "danger")]
 
     def layout(self, w, h):
         P, G = T.s(32), T.s(16)
         iw = w - 2 * P
-        gh, dh = T.s(168), T.s(262)
+        gh, dh = T.s(168), T.s(270)
         self.general.place(x=P, y=0, width=iw, height=gh)
         self.data.place(x=P, y=gh + G, width=iw, height=dh)
         self.privacy.place(x=P, y=gh + dh + 2 * G, width=iw, height=T.s(160))
@@ -727,7 +974,7 @@ class App:
         self.stage = tk.Frame(self.main, bg=T.BG)
         self.pages = {"overview": OverviewPage(self.stage, self), "graphs": GraphsPage(self.stage, self),
                       "inventory": InventoryPage(self.stage, self),
-                      "suggestions": SuggestionsPage(self.stage, self), "settings": SettingsPage(self.stage, self)}
+                      "recovery": RecoveryPage(self.stage, self), "suggestions": SuggestionsPage(self.stage, self), "settings": SettingsPage(self.stage, self)}
         self._geom = (0, 0)
         self._last_count, self._dirty, self._last_refresh = getattr(tracker, "click_count", 0), False, 0.0
         root.bind("<Configure>", self._on_root_conf)
@@ -770,13 +1017,54 @@ class App:
         self.setup = SetupFlow(self.root, self, first_time, start, on_done=self._setup_done, **kw)
         self.setup.start()
 
-    def _setup_done(self, completed, apps, sites):
+    def _setup_done(self, completed, apps, sites, ghost=None):
         self.setup = None
         if self.on_ready:
             self.on_ready()
             self.on_ready = None
         self.show("inventory" if (apps or sites) else "overview")
         self.refresh()
+        if ghost is not None:
+            if completed:
+                self.start_tour(ghost)
+            else:
+                ghost.close()
+
+    # ---- the guided tour: the ghost cursor clicks each tab and explains it
+    TOUR = {"overview": "Overview shows your clicks, busiest hours and most-used apps.",
+            "graphs": "Graphs turn it into charts. Hover over them for details.",
+            "inventory": "Inventory is your recovery list: apps and sites you can't lose.",
+            "recovery": "Recovery downloads those installers into one folder for you.",
+            "suggestions": "Suggestions unlock after 30 days. Weekly check-ins start before that.",
+            "settings": "Settings has backup, the ignore list and your privacy options."}
+
+    def start_tour(self, ghost=None):
+        from guide import GhostCursor
+        if self.setup is not None:
+            return
+        if getattr(self, "tour", None):
+            self.tour.close()
+        ghost = ghost or GhostCursor(self.root, self.motion)
+        self.tour = ghost
+
+        def item_pos(i):
+            return lambda: (self.sidebar.winfo_rootx() + T.s(110),
+                            self.sidebar.winfo_rooty() + self.sidebar._top() + i * self.sidebar._pitch() + T.s(20))
+        script = [("say", "Quick tour! I'll click through the tabs for you.")]
+        for i, (key, _) in enumerate(Sidebar.ITEMS):
+            script += [("move", item_pos(i)), ("click", lambda k=key: self.show(k)), ("say", self.TOUR[key]), ("wait", 2.6)]
+        script += [("say", "That's it. Replay this tour any time from Settings."), ("wait", 2.2)]
+        ghost.run(script)
+        self.root.after(int(1000 * 6 * 3.2 + 4500), lambda g=ghost: self._end_tour(g))
+
+        def stop_on_user_click(e, g=ghost):
+            self._end_tour(g)
+        self._tour_bind = self.root.bind("<ButtonPress>", stop_on_user_click, add="+")
+
+    def _end_tour(self, ghost):
+        if getattr(self, "tour", None) is ghost:
+            self.tour = None
+            ghost.leave()
 
     def redraw(self):
         """Redraws the header; App is also the spring owner of the title fade."""

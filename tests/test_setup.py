@@ -25,6 +25,7 @@ root = tk.Tk()
 store = core.Store(os.path.join(tempfile.mkdtemp(), "o.db"))
 started = []
 app = ui.App(root, store, TR(), on_ready=lambda: started.append(1))
+from guide import GhostCursor
 root.pump(1)
 app.start_setup(True, 0, scanner=Fake()); root.pump(1)
 sf = app.setup

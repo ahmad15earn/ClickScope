@@ -29,7 +29,8 @@ can explore every graph and the unlocked suggestions. Your real data is untouche
 and nothing is tracked in demo mode.
 
 ## 3. First run: guided setup
-On first launch a small blue cursor follows your mouse and guides you:
+On first launch a small blue triangle cursor, separate from your mouse, moves around the screen by itself,
+shows where to click, performs example clicks and narrates each step (like someone showing you around):
 1. ClickScope scans installed programs (and Start Menu shortcuts) by itself, no folder opening needed.
 2. You tick the apps you can't live without; they go into your recovery inventory.
 3. You choose which browsers it may read, once, locally. It lists your most-visited and bookmarked
@@ -37,6 +38,15 @@ On first launch a small blue cursor follows your mouse and guides you:
 4. A thank-you screen, then click counting starts (and the 30-day learning window with it).
 The full scan is saved too, and **Export recovery checklist** writes everything to a .txt file.
 Re-run any time: Inventory > *Scan this PC*, or Settings > *Run setup guide*.
+
+## 3a. Software recovery (new tab)
+Pick the apps (your inventory is pre-selected) and a folder; ClickScope downloads each app's official
+installer in the background into `<folder>\<App name>\`, shows live progress, lets you **Retry** any failure
+with one click, and writes `RECOVERY.txt` as an index. Nothing is installed automatically.
+- Uses Windows Package Manager (**winget**, built into Windows 10/11 as "App Installer"), so downloads come
+  from its official, hash-checked repository. If winget is missing, ClickScope tells you how to get it.
+- Apps without a winget source (paid, Store-only, niche) are marked *Manual*, with a **Search web** link.
+- After the setup guide, the cursor gives a short tour of every tab (replay: Settings > *Replay tour*).
 
 ## 3b. What's new in this version
 - **Fixed:** the donut chart turning fully pink with many small slices (rings are now drawn as polygons).
@@ -88,7 +98,8 @@ src/motion.py    spring animation engine (interruptible, reduced-motion aware)
 src/theme.py     colours and fonts
 src/scanner.py   installed-app + browser-favourites scan (local, one-time)
 src/onboarding.py first-run guided setup
-src/guide.py     the blue cursor companion
+src/guide.py     the blue triangle ghost cursor (guide + tour)
+src/recovery.py  winget-based installer downloader with progress and retry
 installer/       Inno Setup script (folder-choosing installer)
 src/winhook.py   Windows mouse hook + window lookup (ctypes, no dependencies)
 src/core.py      local storage, labeling, suggestion rules, demo data

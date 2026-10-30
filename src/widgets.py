@@ -124,6 +124,11 @@ def draw_icon(c, kind, cx, cy, col, sz, hole=T.CARD):
             rrect(c, x, cy + h - sz * f, x + bw, cy + h, bw / 2, fill=col, outline="")
     elif kind == "inventory":
         c.create_polygon(star_points(cx, cy + sz * 0.04, h * 1.08), fill=col, outline=col)
+    elif kind == "recovery":  # download arrow into a tray
+        c.create_line(cx, cy - h * 0.9, cx, cy + h * 0.25, fill=col, width=2.2, capstyle="round")
+        c.create_line(cx - h * 0.55, cy - h * 0.3, cx, cy + h * 0.3, cx + h * 0.55, cy - h * 0.3, fill=col, width=2.2,
+                      capstyle="round", joinstyle="round")
+        c.create_line(cx - h * 0.9, cy + h * 0.85, cx + h * 0.9, cy + h * 0.85, fill=col, width=2.2, capstyle="round")
     elif kind == "suggestions":  # sparkle
         pts = []
         for i in range(8):
@@ -627,7 +632,7 @@ class PillButton(tk.Canvas):
 # ------------------------------------------------------------------- sidebar
 class Sidebar(tk.Canvas):
     ITEMS = [("overview", "Overview"), ("graphs", "Graphs"), ("inventory", "Inventory"),
-             ("suggestions", "Suggestions"), ("settings", "Settings")]
+             ("recovery", "Recovery"), ("suggestions", "Suggestions"), ("settings", "Settings")]
 
     def __init__(self, parent, motion, on_select, on_pause, on_quit=None, logo=None, demo=False):
         super().__init__(parent, bg=T.SIDEBAR, highlightthickness=0, bd=0)
@@ -739,6 +744,7 @@ class ChecklistCard(Surface):
         self.title, self.subtitle, self.info = title, "", ""
         self.entries, self.selected, self.locked = [], set(), set()
         self.query, self.buttons, self.on_change = "", [], on_change
+        self.demo = None  # key shown ticked by the guide cursor's example click (visual only)
         self.scroll = Spring(motion, self, 0.0, response=0.22, eps=0.3)
         self.bind("<MouseWheel>", self._wheel)
         self.bind("<ButtonPress-1>", self._click)
@@ -780,6 +786,19 @@ class ChecklistCard(Surface):
     def _max_scroll(self):
         top, bot = self._view()
         return max(0, len(self.shown()) * self._pitch() - (bot - top))
+
+    def checkbox_pos(self, i=0):
+        """Local centre of the i-th visible row's checkbox (used by the guide cursor)."""
+        top, _ = self._view()
+        return T.s(26) + T.s(11), top + i * self._pitch() - self.scroll.value + self._pitch() / 2
+
+    def search_pos(self):
+        return self.W - T.s(26) - T.s(210) + T.s(40), T.s(36)
+
+    def first_free(self):
+        for k, _, _ in self.shown():
+            if k not in self.locked:
+                return k
 
     # -- events
     def _wheel(self, e):
@@ -835,7 +854,7 @@ class ChecklistCard(Surface):
                 continue
             locked = key in self.locked
             self.create_line(pad, y + pitch - 1, self.W - pad, y + pitch - 1, fill=T.LINE)
-            self._checkbox(pad, y + (pitch - T.s(22)) / 2, key in self.selected, locked)
+            self._checkbox(pad, y + (pitch - T.s(22)) / 2, key in self.selected or key == self.demo, locked)
             nm = title if len(title) <= 46 else title[:45] + "\u2026"
             self.create_text(pad + T.s(38), y + pitch / 2 - (T.s(9) if sub else 0), text=nm, font=T.F(10, "bold"),
                              fill=T.SUB if locked else T.TEXT, anchor="w")

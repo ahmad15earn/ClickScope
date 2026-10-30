@@ -99,5 +99,43 @@ def test_scanner_and_catalog():
     assert "[ ] 7-Zip" in txt and "github.com" in txt and "Everything else" in txt and "Google Chrome" in txt
 
 
+def test_recovery():
+    import time, recovery
+    table = """Name                 Id                    Version   Available Source
+-----------------------------------------------------------------------
+Google Chrome        Google.Chrome         126.0.1   127.0.2   winget
+7-Zip                7zip.7zip             23.01               winget
+Backup Tool Pro      Acme.BackupToolPro    4.1                 winget"""
+    r = recovery.parse_table(table)
+    assert r[1]["Name"] == "7-Zip" and r[1]["Id"] == "7zip.7zip" and r[0]["Id"] == "Google.Chrome", r
+    assert abs(recovery.parse_progress("  \u2588\u2588 12.5 MB / 50.0 MB") - 0.25) < 1e-6
+    assert recovery.safe_name('A/B:C*') == "A_B_C_"
+    out = tempfile.mkdtemp()
+    fails = {"Acme.BackupToolPro": 1}
+
+    def runner(cmd, on_chunk=None, holder=None):
+        if cmd[1] == "list":
+            return 0, table
+        if cmd[1] == "search":
+            return 0, "Name  Id  Version  Match  Source\n-----\nZoom  Zoom.Zoom  6.0  Tag  winget"
+        wid = cmd[cmd.index("--id") + 1]
+        folder = cmd[cmd.index("--download-directory") + 1]
+        if on_chunk: on_chunk("10.0 MB / 40.0 MB"); on_chunk("40.0 MB / 40.0 MB")
+        if fails.get(wid):
+            fails[wid] = 0
+            return 1, "Download failed: network error"
+        open(os.path.join(folder, "setup.exe"), "w").write("x")
+        return 0, "ok"
+    m = recovery.RecoveryManager(out, ["Google Chrome", "Backup Tool Pro", "Zoom", "Unknown Thing"], runner=runner)
+    m.start(); m.worker.join(5)
+    c = m.counts()
+    assert c == {"done": 2, "failed": 1, "nosource": 1}, c
+    assert os.path.exists(os.path.join(out, "Google Chrome", "setup.exe"))
+    m.retry_failed(); m.worker.join(5)
+    assert m.counts() == {"done": 3, "nosource": 1}, m.counts()
+    idx = open(os.path.join(out, "RECOVERY.txt"), encoding="utf-8").read()
+    assert "[x] Backup Tool Pro" in idx and "[?] Unknown Thing" in idx
+
+
 if __name__ == "__main__":
-    test_labels(); test_store_and_stats(); test_suggestions(); test_30_day_gate(); test_ignore_list(); test_scanner_and_catalog(); print("core tests OK")
+    test_labels(); test_store_and_stats(); test_suggestions(); test_30_day_gate(); test_ignore_list(); test_scanner_and_catalog(); test_recovery(); print("core tests OK")

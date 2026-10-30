@@ -5,13 +5,11 @@ import tkinter as tk
 import scanner as real_scanner
 import theme as T
 from core import resource_path
-from guide import CursorGuide
+from guide import GhostCursor
 from motion import Spring, clamp
 from widgets import ChecklistCard, PillButton, Surface, line_height, measure, rrect
 
 STEPS = ["Welcome", "Scan apps", "Your apps", "Browsers", "Your sites", "Done"]
-GUIDE = ["Hi! I'll guide you. It takes about a minute.", "Scanning your apps...", "Tick the apps you can't live without",
-         "Which browsers should I look at?", "Tick your favourite sites", "Thank you!"]
 
 
 class SetupFlow(tk.Frame):
@@ -36,9 +34,10 @@ class SetupFlow(tk.Frame):
         self.all_btn = PillButton(self.list, self.m, "Select all", lambda: self.list.select_all_shown(), "soft")
         self.list.buttons = [self.all_btn]
         try:
-            self.guide = CursorGuide(app.root, self.m, resource_path("assets/logo_64.png"))
+            self.guide = GhostCursor(app.root, self.m)
         except Exception:
             self.guide = None
+        self._demo_key = None
         self.bind("<Configure>", self._conf)
         self._pending = start
 
@@ -80,8 +79,9 @@ class SetupFlow(tk.Frame):
     # -------------------------------------------------------------- steps
     def go(self, n):
         self.step = n
+        self.list.demo = None
         if self.guide:
-            self.guide.set_text(GUIDE[n])
+            self.guide.stop()
         self.layout()
         if n == 0:
             self.next.restyle("Start setup", "accent")
@@ -119,6 +119,55 @@ class SetupFlow(tk.Frame):
             self.skip.place_forget()
         self.hero.enter()
         self.hero.redraw()
+        if self.guide and n in (0, 1, 2, 3, 4, 5):
+            self.m.later(600, lambda s=n: self.guide and self.step == s and self.guide.run(self._script(s)))
+
+    # ------------------------------------------------- the guide's choreography
+    def _screen(self, w, lx, ly):
+        try:
+            return (w.winfo_rootx() + int(lx), w.winfo_rooty() + int(ly))
+        except Exception:
+            return None
+
+    def _next_pos(self):
+        return self._screen(self.next, self.next.w * 0.5, self.next.h * 0.5)
+
+    def _row_pos(self):
+        return self._screen(self.list, *self.list.checkbox_pos(0))
+
+    def _search_pos(self):
+        return self._screen(self.list, *self.list.search_pos())
+
+    def _bar_pos(self):
+        return self._screen(self.hero, self.hero.W * 0.5, self.hero.H - T.s(30))
+
+    def _demo_toggle(self):
+        """The guide's example click only *shows* a tick; it never changes the user's real selection."""
+        self.list.demo = None if self.list.demo else self.list.first_free()
+        self.list.redraw()
+
+    def _script(self, n):
+        self._demo_key = None
+        if n == 0:
+            return [("say", "Hi! I'm your guide. Let me show you how this works."), ("move", self._next_pos),
+                    ("say", "This button starts the setup. Like this:"), ("click", None),
+                    ("say", "Press it whenever you're ready."), ("park", self._next_pos)]
+        if n == 1:
+            return [("move", self._bar_pos), ("say", "I'm scanning your apps for you. No need to open any folders."),
+                    ("park", self._bar_pos)]
+        if n in (2, 4):
+            what = "app" if n == 2 else "site"
+            return [("say", f"Tick a {what} like this to keep it first."), ("move", self._row_pos), ("click", self._demo_toggle),
+                    ("wait", 1.0), ("say", "Click again to untick."), ("click", self._demo_toggle),
+                    ("say", "You can type here to search."), ("move", self._search_pos), ("click", None),
+                    ("say", "When you're done, press this button."), ("move", self._next_pos), ("park", self._next_pos)]
+        if n == 3:
+            return [("say", "Tick a browser I may read, like this."), ("move", self._row_pos), ("click", self._demo_toggle),
+                    ("wait", 1.0), ("click", self._demo_toggle),
+                    ("say", "I only read bookmarks and most-visited sites, once, on this PC."),
+                    ("move", self._next_pos), ("park", self._next_pos)]
+        return [("say", "All set! Press this and I'll give you a quick tour."), ("move", self._next_pos),
+                ("park", self._next_pos)]
 
     def _list_changed(self):
         k = len(self.list.new_selection())
@@ -150,7 +199,8 @@ class SetupFlow(tk.Frame):
             self.next.place_forget()
             self.list.place_forget()
             if self.guide:
-                self.guide.set_text("Looking at your favourite sites...")
+                self.guide.stop()
+                self.guide.run([("move", self._bar_pos), ("say", "Looking at your favourite sites..."), ("park", self._bar_pos)])
             self.step = 3.5
             self.prog.jump(0)
             self.prog.to(0.9)
@@ -203,15 +253,18 @@ class SetupFlow(tk.Frame):
         poll()
 
     def finish(self, completed):
-        if self.guide:
-            self.guide.close()
-            self.guide = None
+        ghost, self.guide = self.guide, None
+        if ghost:
+            ghost.stop()
+            ghost.say("")
         self.store.set("onboarded", "1" if completed else "skipped")
         if self.first:
             self.store.reset_first_run()
         self.destroy()
         if self.on_done:
-            self.on_done(completed, self.added_apps, self.added_sites)
+            self.on_done(completed, self.added_apps, self.added_sites, ghost)
+        elif ghost:
+            ghost.close()
 
     # --------------------------------------------------------------- hero
     def _draw_hero(self):

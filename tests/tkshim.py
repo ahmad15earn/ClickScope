@@ -125,6 +125,27 @@ def _noop(self, *a, **k):
 for _n in ("focus_set", "tkraise", "lift", "pack", "grid", "attributes", "overrideredirect", "geometry", "update_idletasks"):
     setattr(Widget, _n, _noop)
 Widget.winfo_pointerxy = lambda self: (400, 300)
+Widget.winfo_screenwidth = lambda self: 1920
+Widget.winfo_screenheight = lambda self: 1080
+
+
+def _rootx(self):
+    return int(sum(w.x for w in _chain(self)))
+
+
+def _rooty(self):
+    return int(sum(w.y for w in _chain(self)))
+
+
+def _chain(w):
+    out = []
+    while w is not None:
+        out.append(w)
+        w = w.parent
+    return out
+
+
+Widget.winfo_rootx, Widget.winfo_rooty = _rootx, _rooty
 
 
 class Toplevel(Widget):
@@ -410,6 +431,7 @@ def install():
     fd, mb = types.ModuleType("tkinter.filedialog"), types.ModuleType("tkinter.messagebox")
     fd.asksaveasfilename = lambda **k: ""
     fd.askopenfilename = lambda **k: ""
+    fd.askdirectory = lambda **k: ""
     sd = types.ModuleType("tkinter.simpledialog")
     sd.askstring = lambda *a, **k: None
     tk.simpledialog = sd
