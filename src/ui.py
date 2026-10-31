@@ -13,6 +13,8 @@ from tkinter import filedialog, messagebox, simpledialog
 import theme as T
 from core import (ANALYSIS_DAYS, APP_DIR, MIN_ACTIVE_DAYS, build_suggestions, fmt_hour, quick_insights,
                   resource_path, weekly_apps)
+import cloud
+import cloud_config
 import recovery as rec
 from motion import Motion, Spring, clamp, mix, reduced_motion
 from widgets import (AreaChartCard, BarChartCard, ChecklistCard, DonutCard, ListCard, PillButton, Segmented,
@@ -20,7 +22,7 @@ from widgets import (AreaChartCard, BarChartCard, ChecklistCard, DonutCard, List
 
 RANGES = [("today", "Today"), ("7d", "7 days"), ("30d", "30 days"), ("all", "All time")]
 RANGE_NAME = {"today": "today", "7d": "the last 7 days", "30d": "the last 30 days", "all": "all time"}
-TITLES = {"overview": "Overview", "graphs": "Graphs", "inventory": "Inventory", "recovery": "Recovery", "suggestions": "Suggestions", "settings": "Settings"}
+TITLES = {"overview": "Overview", "graphs": "Graphs", "inventory": "Inventory", "recovery": "Recovery", "account": "Account", "suggestions": "Suggestions", "settings": "Settings"}
 HOUR_LABELS = ["12a", "1a", "2a", "3a", "4a", "5a", "6a", "7a", "8a", "9a", "10a", "11a",
                "12p", "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p", "10p", "11p"]
 DAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -800,6 +802,165 @@ class RecoveryPage(Page):
             rrect(c, c.W - T.s(14), ty, c.W - T.s(9), ty + th, T.s(3), fill=T.LINE2, outline="")
 
 
+class AccountPage(Page):
+    """Google sign-in and cloud backup of the recovery list (never clicks)."""
+
+    SYNCED = ["Your installed-app list", "Must-keep apps and favourite sites", "Your recovery selection"]
+    NEVER = ["Click statistics", "Which apps you click most", "Anything else on your PC"]
+
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        m = app.motion
+        self.card = Surface(self, m)
+        self.cards = [self.card]
+        self.card.draw = self._draw
+        self.busy, self.msg, self.err = False, "", False
+        self.b_in = PillButton(self.card, m, "Sign in", lambda: self._email_auth(False), "dark", width=T.s(150), h=T.s(44))
+        self.b_up = PillButton(self.card, m, "Create account", lambda: self._email_auth(True), "soft", width=T.s(170), h=T.s(44))
+        self.b_google = PillButton(self.card, m, "Continue with Google", self._sign_in, "soft", width=T.s(210), h=T.s(44))
+        ekw = dict(font=T.F(11), relief="flat", bd=0, bg=T.TRACK, fg=T.TEXT, insertbackground=T.TEXT,
+                   highlightthickness=1, highlightbackground=T.LINE, highlightcolor=T.ACCENT)
+        self.e_mail = tk.Entry(self.card, **ekw)
+        self.e_pass = tk.Entry(self.card, show="\u2022", **ekw)
+        self.b_sync = PillButton(self.card, m, "Sync now", self._sync, "dark")
+        self.b_restore = PillButton(self.card, m, "Restore from cloud", self._restore, "soft")
+        self.b_out = PillButton(self.card, m, "Sign out", self._sign_out, "danger")
+
+    def layout(self, w, h):
+        P = T.s(32)
+        self.card.place(x=P, y=0, width=w - 2 * P, height=h - T.s(26))
+
+    def update_data(self):
+        self.card.redraw()
+
+    # ---- actions (network work happens in a background thread)
+    def _email_auth(self, create):
+        st, email, pw = self.app.store, self.e_mail.get().strip(), self.e_pass.get()
+
+        def work():
+            (cloud.sign_up if create else cloud.sign_in_password)(st, email, pw)
+            restored = cloud.pull(st)          # new PC: bring everything back
+            cloud.push(st)                      # existing PC: merge up
+            return restored
+
+        def after(r):
+            self.e_pass.delete(0, "end")
+            if r[1] or r[2]:                    # something was restored: go straight to Recovery
+                self.app.show("recovery")
+        self._run("Signing in\u2026", work, lambda r: (f"Welcome back! Restored {r[1]} kept apps and {r[2]} favourite sites."
+                                                      if (r[1] or r[2]) else "Signed in. Your recovery list is backed up."), after)
+
+    def _run(self, label, fn, ok_text, after=None):
+        if self.busy:
+            return
+        self.busy, self.msg, self.err = True, label, False
+        self.card.redraw()
+
+        def done(res, err):
+            self.busy = False
+            self.err = err is not None
+            self.msg = str(err) if err else ok_text(res)
+            self.card.redraw()
+            self.app.refresh()
+            if after and not err:
+                after(res)
+        cloud.run_bg(self.app.root, fn, done)
+
+    def _sign_in(self):
+        st = self.app.store
+
+        def work():
+            cloud.sign_in(st)
+            restored = cloud.pull(st)          # new PC: bring everything back
+            cloud.push(st)                      # existing PC: merge up
+            return restored
+        self._run("Waiting for Google\u2026 finish signing in in your browser.", work,
+                  lambda r: (f"Signed in. Restored {r[1]} kept apps and {r[2]} favourite sites." if (r[1] or r[2])
+                             else "Signed in. Your recovery list is backed up."))
+
+    def _sync(self):
+        st = self.app.store
+        self._run("Syncing\u2026", lambda: (cloud.pull(st), cloud.push(st)), lambda r: "Everything is up to date.")
+
+    def _restore(self):
+        st = self.app.store
+        self._run("Restoring\u2026", lambda: cloud.pull(st),
+                  lambda r: f"Restored: {r[0]} apps in your list, {r[1]} kept apps, {r[2]} kept sites.")
+
+    def _sign_out(self):
+        cloud.sign_out(self.app.store)
+        self.msg, self.err = "", False
+        self.card.redraw()
+
+    # ---- drawing
+    def _lists(self, c, y):
+        pad = T.s(28)
+        half = (c.W - 2 * pad) / 2
+        for col, (title, items, tint, sym) in enumerate((("Backed up", self.SYNCED, T.GREEN, "\u2713"),
+                                                          ("Never uploaded", self.NEVER, T.RED, "\u2715"))):
+            x = pad + col * half
+            c.text(x, y, title, 10, "bold", fill=T.SUB)
+            for i, line in enumerate(items):
+                yy = y + T.s(28) + i * T.s(28)
+                c.create_oval(x, yy, x + T.s(18), yy + T.s(18), fill=c.fade(mix(T.CARD, tint, 0.16)), outline="")
+                cx, cy = x + T.s(9), yy + T.s(9)
+                if sym == "\u2713":
+                    c.create_line(cx - 4, cy, cx - 1, cy + 3, cx + 4, cy - 3, fill=c.fade(tint), width=T.s(2), capstyle="round", joinstyle="round")
+                else:
+                    c.create_line(cx - 3, cy - 3, cx + 3, cy + 3, fill=c.fade(tint), width=T.s(2), capstyle="round")
+                    c.create_line(cx - 3, cy + 3, cx + 3, cy - 3, fill=c.fade(tint), width=T.s(2), capstyle="round")
+                c.text(x + T.s(28), yy + T.s(1), line, 10)
+
+    def _draw(self):
+        c, pad = self.card, T.s(28)
+        st = self.app.store
+        if not cloud.configured():
+            c.text(pad, T.s(26), "Cloud backup isn't set up yet", 14, "bold")
+            c.text(pad, T.s(56), "Google sign-in needs a Supabase project. Add its URL and publishable key to "
+                                  "src/cloud_config.py and enable Google sign-in in Supabase (see README). Until then your "
+                                  "recovery list stays on this PC; use Settings > Back up data for a manual copy.",
+                   10, fill=T.SUB, width=c.W - 2 * pad)
+            return
+        sess = cloud.session(st) if cloud.signed_in(st) else None
+        if sess:
+            email = sess.get("email") or "Signed in"
+            c.create_oval(pad, T.s(26), pad + T.s(52), T.s(78), fill=c.fade(T.ACCENT), outline="")
+            c.text(pad + T.s(26), T.s(52), (email[:1] or "?").upper(), 18, "bold", fill="#06303A", anchor="center", rise=False, bg=T.ACCENT)
+            c.text(pad + T.s(68), T.s(28), email, 13, "bold")
+            last = st.get("cloud_last_sync", "")
+            c.text(pad + T.s(68), T.s(54), f"Last synced {last}" if last else "Not synced yet", 10, fill=T.SUB)
+        else:
+            c.text(pad, T.s(26), "Back up your recovery list", 14, "bold")
+            c.text(pad, T.s(54), "Create a free account to keep your recovery inventory safe. On a new PC, install ClickScope, "
+                                  "sign in, and your apps, favourite sites and recovery selection come back, ready to download.",
+                   10, fill=T.SUB, width=c.W - 2 * pad)
+        y = T.s(120)
+        self._lists(c, y)
+        by = y + T.s(130)
+        if self.msg:
+            c.text(pad, by, self.msg, 10, "bold", fill=T.RED if self.err else (T.SUB if self.busy else T.ACCENT_D), width=c.W - 2 * pad)
+            by += T.s(46)
+        if self.busy:
+            return
+        if sess:
+            x = pad
+            for b in (self.b_sync, self.b_restore, self.b_out):
+                c.create_window(x, by, window=b, anchor="nw")
+                x += b.w + T.s(10)
+        else:
+            c.text(pad, by, "Email", 9, "bold", fill=T.SUB)
+            c.create_window(pad, by + T.s(20), window=self.e_mail, anchor="nw", width=T.s(340), height=T.s(36))
+            c.text(pad + T.s(370), by, "Password (at least 6 characters)", 9, "bold", fill=T.SUB)
+            c.create_window(pad + T.s(370), by + T.s(20), window=self.e_pass, anchor="nw", width=T.s(300), height=T.s(36))
+            bx, byy = pad, by + T.s(74)
+            for b in ([self.b_in, self.b_up] + ([self.b_google] if cloud_config.GOOGLE_ENABLED else [])):
+                c.create_window(bx, byy, window=b, anchor="nw")
+                bx += b.w + T.s(10)
+            c.text(pad, byy + T.s(58), "New here? Type an email and password, then press Create account. On a new PC, "
+                                       "just press Sign in with the same details. Use a password you don't use anywhere else.",
+                   9, fill=T.SUB, width=c.W - 2 * pad)
+
+
 class SettingsPage(Page):
     def __init__(self, parent, app):
         super().__init__(parent, app)
@@ -974,7 +1135,7 @@ class App:
         self.stage = tk.Frame(self.main, bg=T.BG)
         self.pages = {"overview": OverviewPage(self.stage, self), "graphs": GraphsPage(self.stage, self),
                       "inventory": InventoryPage(self.stage, self),
-                      "recovery": RecoveryPage(self.stage, self), "suggestions": SuggestionsPage(self.stage, self), "settings": SettingsPage(self.stage, self)}
+                      "recovery": RecoveryPage(self.stage, self), "account": AccountPage(self.stage, self), "suggestions": SuggestionsPage(self.stage, self), "settings": SettingsPage(self.stage, self)}
         self._geom = (0, 0)
         self._last_count, self._dirty, self._last_refresh = getattr(tracker, "click_count", 0), False, 0.0
         root.bind("<Configure>", self._on_root_conf)
@@ -1022,7 +1183,8 @@ class App:
         if self.on_ready:
             self.on_ready()
             self.on_ready = None
-        self.show("inventory" if (apps or sites) else "overview")
+        tab = getattr(self, "after_setup_tab", None)
+        self.show(tab or ("inventory" if (apps or sites) else "overview"))
         self.refresh()
         if ghost is not None:
             if completed:
@@ -1036,6 +1198,7 @@ class App:
             "inventory": "Inventory is your recovery list: apps and sites you can't lose.",
             "recovery": "Recovery downloads those installers into one folder for you.",
             "suggestions": "Suggestions unlock after 30 days. Weekly check-ins start before that.",
+            "account": "Account backs up your recovery list, so a new PC can restore it.",
             "settings": "Settings has backup, the ignore list and your privacy options."}
 
     def start_tour(self, ghost=None):
@@ -1055,7 +1218,7 @@ class App:
             script += [("move", item_pos(i)), ("click", lambda k=key: self.show(k)), ("say", self.TOUR[key]), ("wait", 2.6)]
         script += [("say", "That's it. Replay this tour any time from Settings."), ("wait", 2.2)]
         ghost.run(script)
-        self.root.after(int(1000 * 6 * 3.2 + 4500), lambda g=ghost: self._end_tour(g))
+        self.root.after(int(1000 * len(Sidebar.ITEMS) * 3.2 + 4500), lambda g=ghost: self._end_tour(g))
 
         def stop_on_user_click(e, g=ghost):
             self._end_tour(g)

@@ -47,8 +47,8 @@ g.stop(); g.close()
 visited = []
 orig = app.show
 app.show = lambda k: (visited.append(k), orig(k))[1]
-app.start_tour(); root.pump(30)
-assert visited[:6] == [k for k, _ in ui.Sidebar.ITEMS], visited
+app.start_tour(); root.pump(45)
+assert visited[:len(ui.Sidebar.ITEMS)] == [k for k, _ in ui.Sidebar.ITEMS], visited
 app.show = orig; root.pump(3)
 
 # 3) recovery page: idle, running (mixed statuses), retry

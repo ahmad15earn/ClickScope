@@ -124,6 +124,9 @@ def draw_icon(c, kind, cx, cy, col, sz, hole=T.CARD):
             rrect(c, x, cy + h - sz * f, x + bw, cy + h, bw / 2, fill=col, outline="")
     elif kind == "inventory":
         c.create_polygon(star_points(cx, cy + sz * 0.04, h * 1.08), fill=col, outline=col)
+    elif kind == "account":
+        c.create_oval(cx - h * 0.36, cy - h * 0.95, cx + h * 0.36, cy - h * 0.23, fill=col, outline=col)
+        rrect(c, cx - h * 0.85, cy + h * 0.1, cx + h * 0.85, cy + h * 0.95, h * 0.5, fill=col, outline=col)
     elif kind == "recovery":  # download arrow into a tray
         c.create_line(cx, cy - h * 0.9, cx, cy + h * 0.25, fill=col, width=2.2, capstyle="round")
         c.create_line(cx - h * 0.55, cy - h * 0.3, cx, cy + h * 0.3, cx + h * 0.55, cy - h * 0.3, fill=col, width=2.2,
@@ -632,7 +635,8 @@ class PillButton(tk.Canvas):
 # ------------------------------------------------------------------- sidebar
 class Sidebar(tk.Canvas):
     ITEMS = [("overview", "Overview"), ("graphs", "Graphs"), ("inventory", "Inventory"),
-             ("recovery", "Recovery"), ("suggestions", "Suggestions"), ("settings", "Settings")]
+             ("recovery", "Recovery"), ("suggestions", "Suggestions"), ("account", "Account"),
+             ("settings", "Settings")]
 
     def __init__(self, parent, motion, on_select, on_pause, on_quit=None, logo=None, demo=False):
         super().__init__(parent, bg=T.SIDEBAR, highlightthickness=0, bd=0)

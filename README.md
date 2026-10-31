@@ -60,6 +60,26 @@ with one click, and writes `RECOVERY.txt` as an index. Nothing is installed auto
 - **Close = keep running:** the X button minimizes; use *Quit ClickScope* in the sidebar to exit.
 - **Ignore list:** right-click a row in Overview to stop counting an app or website.
 
+## 3c. Account and cloud backup (Account tab)
+Create an account (email + password) and your **recovery list** (installed-app list, must-keep apps and sites, recovery
+selection) is backed up to Supabase and syncs automatically. On a new PC: install ClickScope, choose
+**Restore with Google** on the welcome screen (or Account > Sign in), and it opens Recovery with everything
+ready to download. **Clicks are never uploaded.** Data is protected by Row Level Security (only you can read it).
+
+**Sign-in method:** email + password (works with just Supabase, no Google account setup or credit card needed).
+Google sign-in is optional and off by default (`GOOGLE_ENABLED` in `src/cloud_config.py`).
+
+Already done for you: the Supabase project `clickscope` exists, `supabase/schema.sql` is applied (Row Level
+Security on), and `src/cloud_config.py` points to it.
+
+One step left for you (1 minute): Supabase dashboard > project **clickscope** > Authentication > Sign In / Providers
+> Email: switch **Confirm email** OFF, so new accounts can sign in immediately (you can turn it back on later).
+The sign-in session is stored in ClickScope's local database; *Sign out* removes it.
+
+Optional Google sign-in (needs a Google Cloud OAuth client): create a Web OAuth client with redirect URI
+`https://<project-ref>.supabase.co/auth/v1/callback`, enable Supabase > Authentication > Providers > Google,
+add `http://127.0.0.1:*/**` to Redirect URLs, then set `GOOGLE_ENABLED = True`.
+
 ## 4. Using ClickScope
 - **Overview**: total clicks (with change vs. the previous period), apps used,
   websites, busiest hour, an activity chart (hover for exact numbers) and Most/Least
@@ -99,6 +119,9 @@ src/theme.py     colours and fonts
 src/scanner.py   installed-app + browser-favourites scan (local, one-time)
 src/onboarding.py first-run guided setup
 src/guide.py     the blue triangle ghost cursor (guide + tour)
+src/cloud.py     email sign-in (+ optional Google) and recovery backup/restore via Supabase
+src/cloud_config.py  Supabase URL + publishable key
+supabase/schema.sql  tables, Row Level Security, sync function
 src/recovery.py  winget-based installer downloader with progress and retry
 installer/       Inno Setup script (folder-choosing installer)
 src/winhook.py   Windows mouse hook + window lookup (ctypes, no dependencies)

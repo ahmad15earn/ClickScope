@@ -132,6 +132,7 @@ class Store:
             os.makedirs(APP_DIR, exist_ok=True)
             path = os.path.join(APP_DIR, "clickscope.db")
         self.path = path
+        self.cloud_dirty = False
         self.lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False)
         try:
@@ -183,6 +184,7 @@ class Store:
 
     # --- full scanned catalog (everything installed / favourite sites), kept for recovery
     def set_catalog(self, kind, items):
+        self.cloud_dirty = True
         with self.lock:
             self.db.execute("DELETE FROM catalog WHERE kind=?", (kind,))
             self.db.executemany("INSERT OR REPLACE INTO catalog(kind,name,detail) VALUES(?,?,?)",
@@ -294,6 +296,8 @@ class Store:
         return r[0] if r else default
 
     def set(self, key, value):
+        if key in ("kept", "kept_sites", "recovery_apps", "winget_ids"):
+            self.cloud_dirty = True
         with self.lock:
             self.db.execute("INSERT INTO settings(key,value) VALUES(?,?) "
                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))

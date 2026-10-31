@@ -1,7 +1,9 @@
 """First-run setup: scan installed apps and favourite sites, guided by a small cursor companion."""
 import threading
 import tkinter as tk
+from tkinter import messagebox
 
+import cloud
 import scanner as real_scanner
 import theme as T
 from core import resource_path
@@ -31,6 +33,8 @@ class SetupFlow(tk.Frame):
         self.list = ChecklistCard(self, self.m, "", self._list_changed)
         self.skip = PillButton(self, self.m, "Skip for now", lambda: self.finish(False), "soft", bg=T.BG)
         self.next = PillButton(self, self.m, "Start setup", self._next, "accent", bg=T.BG, width=T.s(214), h=T.s(40))
+        self.restore_btn = PillButton(self, self.m, "I already have an account", self._restore, "soft", bg=T.BG,
+                                      width=T.s(230), h=T.s(40))
         self.all_btn = PillButton(self.list, self.m, "Select all", lambda: self.list.select_all_shown(), "soft")
         self.list.buttons = [self.all_btn]
         try:
@@ -75,6 +79,10 @@ class SetupFlow(tk.Frame):
             self.skip.place(x=M, y=bar_y + T.s(8))
         if not self.busy:
             self.next.place(x=W - M - self.next.w, y=bar_y + T.s(4))
+        if self.step == 0 and cloud.configured() and not self.busy:
+            self.restore_btn.place(x=W - M - self.next.w - self.restore_btn.w - T.s(12), y=bar_y + T.s(4))
+        else:
+            self.restore_btn.place_forget()
 
     # -------------------------------------------------------------- steps
     def go(self, n):
@@ -213,6 +221,11 @@ class SetupFlow(tk.Frame):
             self.go(5)
         elif s == 5:
             self.finish(True)
+
+    def _restore(self):
+        """New PC: skip the scan and sign in on the Account tab; signing in restores the saved recovery list."""
+        self.app.after_setup_tab = "account"
+        self.finish(False)
 
     def _apps_done(self, result, err):
         self.busy = False

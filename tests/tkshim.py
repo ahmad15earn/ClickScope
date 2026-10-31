@@ -148,6 +148,24 @@ def _chain(w):
 Widget.winfo_rootx, Widget.winfo_rooty = _rootx, _rooty
 
 
+class Entry(Widget):
+    def __init__(self, parent=None, **kw):
+        super().__init__(parent, **kw)
+        self.text = ""
+
+    def get(self): return self.text
+    def insert(self, i, s): self.text += s
+    def delete(self, a, b=None): self.text = ""
+
+    def render(self):
+        img = Image.new("RGBA", (self.w * K, self.h * K), hexcol(self.cfg.get("bg", "#EEEEEE")))
+        d = ImageDraw.Draw(img)
+        shown = ("\u2022" * len(self.text)) if self.cfg.get("show") else self.text
+        d.rectangle([0, 0, img.width - 1, img.height - 1], outline=hexcol("#E7E9EE"), width=K)
+        d.text((10 * K, img.height / 2 - 9 * K), shown, font=pil_font(self.cfg.get("font", ("x", 11))), fill=(29, 29, 31, 255))
+        return img
+
+
 class Toplevel(Widget):
     pass
 
@@ -359,6 +377,8 @@ class Canvas(Widget):
             img.alpha_composite(big, (int(c[0]), int(c[1])))
         elif t == "window":
             ch = o["window"]
+            if o.get("width"): ch.w = int(o["width"])
+            if o.get("height"): ch.h = int(o["height"])
             sub = ch.render()
             ax, ay = c[0], c[1]
             anchor = o.get("anchor", "center")
@@ -423,7 +443,7 @@ class FontObj:
 
 def install():
     tk = types.ModuleType("tkinter")
-    tk.Tk, tk.Frame, tk.Canvas, tk.PhotoImage, tk.Toplevel = Tk, Frame, Canvas, PhotoImage, Toplevel
+    tk.Tk, tk.Frame, tk.Canvas, tk.PhotoImage, tk.Toplevel, tk.Entry = Tk, Frame, Canvas, PhotoImage, Toplevel, Entry
     tk.TclError = Exception
     font = types.ModuleType("tkinter.font")
     font.Font = FontObj
