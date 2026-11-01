@@ -122,8 +122,37 @@ CREATE TABLE IF NOT EXISTS clicks(day TEXT, kind TEXT, name TEXT, n INTEGER,
 CREATE TABLE IF NOT EXISTS hours(day TEXT, hour INTEGER, n INTEGER,
     PRIMARY KEY(day, hour));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS catalog(kind TEXT, name TEXT, detail TEXT, PRIMARY KEY(kind, name));
+CREATE TABLE IF NOT EXISTS catalog(kind TEXT, name TEXT, detail TEXT, size_mb INTEGER DEFAULT 0, PRIMARY KEY(kind, name));
 """
+
+
+SUBSCRIPTION_HINTS = ["adobe", "creative cloud", "microsoft 365", "office 365", "canva", "figma", "grammarly",
+                      "dropbox", "spotify", "evernote", "nordvpn", "expressvpn", "surfshark", "1password",
+                      "lastpass", "dashlane", "jetbrains", "pycharm", "intellij", "webstorm", "notion", "camtasia",
+                      "filmora", "wondershare", "autodesk", "sketch", "zoom workplace", "slack"]
+ALIASES = {"vscode": ["visualstudiocode"], "word": ["microsoftword", "microsoft365", "office"],
+           "excel": ["microsoftexcel", "microsoft365", "office"], "powerpoint": ["microsoftpowerpoint", "microsoft365", "office"],
+           "googlechrome": ["chrome"], "microsoftedge": ["edge"], "terminal": ["windowsterminal"]}
+SYSTEM_HINTS = ["windows", "microsoft edge", "onedrive", "driver", "nvidia", "intel", "realtek", "amd ", "bluetooth", "touchpad"]
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def same_app(label, name):
+    """Does a tracked window label (e.g. 'VS Code') belong to this installed app (e.g. 'Visual Studio Code')?"""
+    a, b = _norm(label), _norm(name)
+    if not a or not b:
+        return False
+    if a == b or (len(a) >= 4 and (a in b or b in a)):
+        return True
+    return any(al in b for al in ALIASES.get(a, []))
+
+
+def is_system_app(name):
+    low = name.lower()
+    return any(h in low for h in SYSTEM_HINTS)
 
 
 class Store:
@@ -140,6 +169,10 @@ class Store:
         except sqlite3.DatabaseError:
             pass
         self.db.executescript(SCHEMA)
+        try:  # databases created by older versions
+            self.db.execute("ALTER TABLE catalog ADD COLUMN size_mb INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         self.db.commit()
 
     # --- writing
@@ -184,12 +217,18 @@ class Store:
 
     # --- full scanned catalog (everything installed / favourite sites), kept for recovery
     def set_catalog(self, kind, items):
+        """items: (name, detail) or (name, detail, size_mb). Existing sizes are kept for 2-tuples."""
         self.cloud_dirty = True
+        old = self.catalog_sizes(kind)
+        rows = [(kind, it[0], it[1], int(it[2]) if len(it) > 2 else old.get(it[0], 0)) for it in items]
         with self.lock:
             self.db.execute("DELETE FROM catalog WHERE kind=?", (kind,))
-            self.db.executemany("INSERT OR REPLACE INTO catalog(kind,name,detail) VALUES(?,?,?)",
-                                [(kind, n, d) for n, d in items])
+            self.db.executemany("INSERT OR REPLACE INTO catalog(kind,name,detail,size_mb) VALUES(?,?,?,?)", rows)
             self.db.commit()
+
+    def catalog_sizes(self, kind="app"):
+        with self.lock:
+            return dict(self.db.execute("SELECT name, COALESCE(size_mb,0) FROM catalog WHERE kind=?", (kind,)).fetchall())
 
     def catalog(self, kind):
         with self.lock:
@@ -420,6 +459,58 @@ class Store:
         ready = elapsed >= ANALYSIS_DAYS and self.active_days() >= MIN_ACTIVE_DAYS
         return (min(ANALYSIS_DAYS, elapsed + 1), ready, first + datetime.timedelta(days=ANALYSIS_DAYS))
 
+    # --- recovery-centred analysis (clicks are only a discovery tool)
+    def tracked_days(self):
+        return (datetime.date.today() - self.first_run()).days + 1
+
+    def _last_days(self):
+        with self.lock:
+            return {n: d for n, d in self.db.execute("SELECT name, MAX(day) FROM clicks WHERE kind='app' GROUP BY name")}
+
+    def last_used(self, name, last_days=None):
+        """Most recent day a tracked app label matches this installed app's name (or None)."""
+        last_days = last_days if last_days is not None else self._last_days()
+        best = None
+        for label, day in last_days.items():
+            if same_app(label, name) and (best is None or day > best):
+                best = day
+        return datetime.date.fromisoformat(best) if best else None
+
+    def frequent_unprotected(self, limit=5, rng="30d"):
+        kept = self.kept()
+        return [(a, n) for a, n in self.top("app", rng)
+                if not any(same_app(a, k) for k in kept) and a not in SYSTEM_LABELS and n >= 20][:limit]
+
+    def unused_apps(self, days=30):
+        """Installed apps (not in the recovery list) with no clicks for `days` days: [(name, size_mb, last_date)]."""
+        if self.tracked_days() < days:
+            return []
+        kept = {k.lower() for k in self.kept()}
+        sizes, ld = self.catalog_sizes("app"), self._last_days()
+        cutoff = datetime.date.today() - datetime.timedelta(days=days)
+        out = []
+        for name, _ in self.catalog("app"):
+            if name.lower() in kept or is_system_app(name):
+                continue
+            last = self.last_used(name, ld)
+            if last is None or last < cutoff:
+                out.append((name, sizes.get(name, 0), last))
+        return sorted(out, key=lambda t: -t[1])
+
+    def subscription_alerts(self, days=30):
+        """Installed apps that are usually paid subscriptions and have not been opened for `days` days."""
+        if self.tracked_days() < days:
+            return []
+        ld = self._last_days()
+        cutoff = datetime.date.today() - datetime.timedelta(days=days)
+        out = []
+        for name, _ in self.catalog("app"):
+            if any(h in name.lower() for h in SUBSCRIPTION_HINTS):
+                last = self.last_used(name, ld)
+                if last is None or last < cutoff:
+                    out.append((name, (datetime.date.today() - last).days if last else None))
+        return out
+
     def export_csv(self, path):
         with self.lock:
             rows = self.db.execute("SELECT day, kind, name, n FROM clicks ORDER BY day, kind, n DESC").fetchall()
@@ -430,108 +521,59 @@ class Store:
 
 
 # -------------------------------------------------------------- suggestions
-WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-
-
 def build_suggestions(store, rng="30d"):
-    """Rule-based tips from the last 30 days. Called only once the learning window is over."""
-    total = store.total(rng)
-    if total < 30:
-        return [dict(level="info", title="Not enough activity yet",
-                     text="ClickScope saw very few clicks in the last 30 days, so there is nothing "
-                          "reliable to suggest. Keep it running while you work.")]
-    apps = store.top("app", rng)
-    sites = store.top("site", rng)
+    """Recovery-centred insights. Clicks are only used to discover what matters; there are no vanity stats.
+    Each item may carry an 'action' the UI turns into a button."""
     out = []
+    for name, n in store.frequent_unprotected(2, rng):
+        out.append(dict(level="tip", title=f"{name} isn't in your recovery list",
+                        text=f"You use it a lot ({n:,} clicks in 30 days). If your PC failed you would want it back first. "
+                             "Add it to your list?",
+                        action={"label": "Add to recovery list", "kind": "keep", "name": name}))
 
-    name, n = apps[0]
-    if n / total >= 0.35 and len(apps) > 1:
-        out.append(dict(level="tip", title=f"{name} is your main workspace",
-                        text=f"{n / total:.0%} of your clicks happen here. Learning its keyboard shortcuts "
-                             f"and pinning it to the taskbar is the quickest way to save clicks."))
+    unused = store.unused_apps(30)
+    if unused:
+        mb = sum(s for _, s, _ in unused)
+        names = ", ".join(n for n, _, _ in unused[:3]) + (f" and {len(unused) - 3} more" if len(unused) > 3 else "")
+        size = f" Removing them could free about {mb / 1024:.1f} GB." if mb >= 200 else ""
+        out.append(dict(level="info", title=f"{len(unused)} installed apps look unused",
+                        text=f"ClickScope has not seen {names} opened in the last 30 days.{size} "
+                             "Matching is by name, so double-check before you uninstall."))
 
-    browser = sum(c for a, c in apps if a in BROWSER_LABELS)
-    if browser / total >= 0.6:
-        out.append(dict(level="tip", title="Most of your clicking happens in the browser",
-                        text=f"{browser / total:.0%} of clicks. Pin your top tabs, use the bookmarks bar, "
-                             "and try Ctrl+L (address bar) and Ctrl+Tab (switch tabs) to click less."))
-
-    if sites:
-        s_total = sum(c for _, c in sites)
-        sname, sn = sites[0]
-        if s_total >= 30 and sn / s_total >= 0.4:
-            out.append(dict(level="tip", title=f"{sname} dominates your browsing",
-                            text=f"{sn / s_total:.0%} of your website clicks. Pin it as a tab, or install it as "
-                                 "an app window so it is one click away."))
-
-    keep = set(store.kept())
-    rare = [a for a, c in reversed(apps) if c <= 5 and c / total <= 0.02 and a not in SYSTEM_LABELS and a not in keep][:3]
-    if rare and total >= 150:
-        out.append(dict(level="info", title="Rarely used apps",
-                        text=f"{', '.join(rare)} barely got any clicks in 30 days. Consider unpinning or "
-                             "uninstalling them to declutter your taskbar and Start menu."))
-
-    active = [a for a, c in apps if c >= 10 and a not in SYSTEM_LABELS]
-    if len(active) >= 10:
-        out.append(dict(level="info", title=f"You juggle {len(active)} apps",
-                        text="Try virtual desktops (Win+Ctrl+D) to group apps by task, and Win+Tab to move between them."))
-
-    ph = store.busiest_hour(rng)
-    if ph is not None and total >= 100:
-        out.append(dict(level="info", title=f"Your busiest hour is {fmt_hour(ph)}",
-                        text="Plan demanding, click-heavy work around it, and take a short break right after."))
-
-    wd = store.weekday_totals(rng)
-    if sum(wd) >= 100:
-        avg = sum(wd) / 7
-        best = max(range(7), key=lambda i: wd[i])
-        if wd[best] >= avg * 1.35:
-            out.append(dict(level="info", title=f"{WEEKDAYS[best]} is your busiest day",
-                            text=f"You click about {wd[best] / avg - 1:.0%} more than on an average day. "
-                                 "Keep it lighter on meetings and admin if you can."))
-
-    daily = store.daily_series(30)
-    last7 = sum(v for _, v in daily[-7:])
-    prev = [v for _, v in daily[:-7]]
-    prev_avg7 = (sum(prev) / len(prev)) * 7 if prev else 0
-    if prev_avg7 > 100:
-        if last7 >= prev_avg7 * 1.25:
-            out.append(dict(level="warn", title="You are clicking more lately",
-                            text=f"The last 7 days are {last7 / prev_avg7 - 1:.0%} above your usual pace. "
-                                 "A good moment to stretch and rest your hand."))
-        elif last7 <= prev_avg7 * 0.75:
-            out.append(dict(level="good", title="A calmer week",
-                            text=f"The last 7 days are {1 - last7 / prev_avg7:.0%} below your usual pace."))
+    subs = store.subscription_alerts(30)
+    if subs:
+        names = ", ".join(n for n, _ in subs[:3]) + (f" and {len(subs) - 3} more" if len(subs) > 3 else "")
+        out.append(dict(level="warn", title=f"Still paying for {subs[0][0]}?" if len(subs) == 1 else f"Still paying for {len(subs)} subscriptions?",
+                        text=f"Not opened in the last 30 days: {names}. If any of these are paid plans, cancelling could "
+                             "save you money. Keep only what you still use."))
 
     quiet = [n for n, c, _ in store.keep_info() if c <= 5]
     if quiet:
-        out.append(dict(level="good", title="Rarely clicked, still important",
-                        text=f"{', '.join(quiet[:3])} barely get clicks, but they are in your recovery inventory, "
-                             "so ClickScope will never suggest removing them. Clicks measure habit, not importance."))
-
-    days = max(1, store.days_with_data(rng))
-    if total / days >= 6000:
-        out.append(dict(level="warn", title="Heavy mouse use",
-                        text=f"About {total // days:,} clicks per active day. Keyboard shortcuts and short "
-                             "breaks can ease the load on your hand."))
-
+        out.append(dict(level="good", title="Rarely clicked, still protected",
+                        text=f"{', '.join(quiet[:3])} barely get clicks, but they are in your recovery list, so "
+                             "ClickScope will never suggest removing them. Clicks measure habit, not importance."))
     if not out:
-        out.append(dict(level="good", title="Nothing stands out",
-                        text="Your click activity looks balanced over the last 30 days."))
-    return out[:6]
+        out.append(dict(level="good", title="Your recovery list looks healthy",
+                        text="The apps you use most are protected and nothing looks unused. Check back next month."))
+    return out[:5]
 
 
 def quick_insights(store):
-    """Small early insights shown during the 30-day learning window."""
+    """Small early insights shown during the 30-day learning window (recovery-centred)."""
+    apps = store.catalog("app")
     total = store.total("all")
+    out = []
+    if apps:
+        out.append(f"{len(apps)} apps found on this PC, {len(store.kept())} in your recovery list.")
     if total < 50:
-        return ["First insights appear after about 50 clicks. Use your PC as usual."]
-    apps = store.top("app", "all")
-    out = [f"{apps[0][0]} gets {apps[0][1] / total:.0%} of your clicks so far."]
-    ph = store.busiest_hour("all")
-    if ph is not None:
-        out.append(f"Your busiest hour so far is {fmt_hour(ph)}.")
-    return out
+        out.append("As you work, ClickScope spots the apps you rely on. First results appear after about 50 clicks.")
+        return out[:2]
+    fu = store.frequent_unprotected(5, "all")
+    if fu:
+        out.append(f"{len(fu)} apps you use often aren't protected yet, such as {fu[0][0]}.")
+    else:
+        out.append("Everything you use often is already in your recovery list.")
+    return out[:2]
 
 
 def weekly_apps(store):
@@ -548,7 +590,7 @@ def seed_demo(store):
     today = datetime.date.today()
     now = datetime.datetime.now()
     apps = [("Google Chrome", 62), ("VS Code", 22), ("Slack", 9), ("File Explorer & Desktop", 8),
-            ("Word", 7), ("Figma", 6), ("Terminal", 5), ("Zoom", 3), ("Spotify", 2)]
+            ("Word", 7), ("Figma", 12), ("Terminal", 5), ("Spotify", 2), ("Git", 1)]
     sites = [("YouTube", 46), ("Gmail", 18), ("GitHub", 14), ("ChatGPT", 12), ("Facebook", 8),
              ("Google Docs", 6), ("Reddit", 4), ("Wikipedia", 3)]
     hour_w = [0, 0, 0, 0, 0, 0, 1, 3, 7, 10, 11, 9, 5, 7, 10, 11, 10, 8, 5, 4, 5, 4, 2, 1]
@@ -585,4 +627,15 @@ def seed_demo(store):
             store.db.execute("INSERT INTO clicks(day,kind,name,n) VALUES(?,?,?,?)",
                              ((today - datetime.timedelta(days=9)).strftime("%Y-%m-%d"), "app", name, n))
         store.db.commit()
+    store.set_catalog("app", [
+        ("Google Chrome", "Google LLC  \u00b7  v126.0", 600), ("Visual Studio Code", "Microsoft  \u00b7  v1.94", 420),
+        ("Slack", "Slack Technologies", 380), ("Figma", "Figma, Inc.", 310), ("Zoom Workplace", "Zoom Video", 450),
+        ("Spotify", "Spotify AB", 350), ("7-Zip", "Igor Pavlov  \u00b7  v23.01", 5), ("Git", "Git Community  \u00b7  v2.46", 330),
+        ("Adobe Creative Cloud", "Adobe Inc.", 1700), ("Adobe Premiere Pro 2025", "Adobe Inc.", 8400),
+        ("Cyberpunk 2077", "CD PROJEKT RED", 62000), ("Backup Tool Pro", "Acme  \u00b7  v4.1", 90),
+        ("VLC media player", "VideoLAN", 160), ("OBS Studio", "OBS Project", 280), ("Notion", "Notion Labs", 240)])
+    for n in ("Visual Studio Code", "Backup Tool Pro"):
+        store.set_keep(n, True)
+    store.set_catalog("site", [("github.com", "301 visits"), ("youtube.com", "412 visits"), ("mail.google.com", "250 visits")])
+    store.toggle_keep_site("github.com")
     store.set("first_run", (today - datetime.timedelta(days=30)).strftime("%Y-%m-%d"))

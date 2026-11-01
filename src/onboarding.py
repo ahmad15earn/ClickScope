@@ -103,7 +103,7 @@ class SetupFlow(tk.Frame):
             kept = set(self.store.kept())
             self.list.title = "Your installed software"
             self.list.subtitle = "Tick the apps to get back first if your PC fails. Everything found is also saved in your full list."
-            self.list.set_items([(a, a, d) for a, d in self.apps], (), {a for a, _ in self.apps if a in kept})
+            self.list.set_items([(a[0], a[0], a[1]) for a in self.apps], (), {a[0] for a in self.apps if a[0] in kept})
             self.all_btn.restyle("Select all", "soft")
             self._list_changed()
         elif n == 3:
@@ -294,14 +294,28 @@ class SetupFlow(tk.Frame):
             if self.big_logo:
                 c.create_image(cx - self.big_logo.width() / 2, T.s(86), image=self.big_logo, anchor="nw")
             title = "Welcome to ClickScope" if s == 0 else "Thank you!"
-            body = ("Let's set up in about a minute. ClickScope will look at the software and websites on this PC, so you "
-                    "always have a recovery list if your computer ever fails. Everything stays on this PC."
+            body = ("ClickScope builds a recovery list of the apps and sites you rely on, so a crashed or replaced PC "
+                    "never costs you your setup. It watches quietly which apps you use, only to find what to protect."
                     if s == 0 else
-                    "ClickScope is ready and now counting your clicks. Your full list of software is saved, and your "
-                    "first suggestions unlock in 30 days. You can rescan any time from the Inventory tab.")
-            y = T.s(86) + (self.big_logo.height() if self.big_logo else 0) + T.s(26)
+                    "ClickScope is ready and will run quietly in the background, starting with Windows so it is always on. "
+                    "Open it from the taskbar any time. Your first insights unlock in 30 days.")
+            y = T.s(86) + (self.big_logo.height() if self.big_logo else 0) + T.s(22)
             c.text(cx, y, title, 26, "bold", anchor="n")
-            c.text(cx, y + T.s(50), body, 11, fill=T.SUB, anchor="n", width=min(T.s(600), c.W - 2 * pad), justify="center")
+            if s == 0:
+                c.text(cx, y + T.s(48), "Your click data never leaves this PC.", 15, "bold", fill=T.ACCENT_D, anchor="n")
+                c.text(cx, y + T.s(80), body, 11, fill=T.SUB, anchor="n", width=min(T.s(620), c.W - 2 * pad), justify="center")
+                chips = ["No keystrokes", "No screenshots", "Nothing uploaded unless you sign in"]
+                total = sum(measure(t, 10, "bold") + T.s(54) for t in chips) + T.s(12) * (len(chips) - 1)
+                x, cy2 = cx - total / 2, y + T.s(168)
+                for t in chips:
+                    wdt = measure(t, 10, "bold") + T.s(54)
+                    rrect(c, x, cy2, x + wdt, cy2 + T.s(34), T.s(17), fill=c.fade(T.ACCENT_SOFT), outline="")
+                    c.create_line(x + T.s(14), cy2 + T.s(17), x + T.s(19), cy2 + T.s(22), x + T.s(28), cy2 + T.s(12),
+                                  fill=c.fade(T.ACCENT_D), width=T.s(2.2), capstyle="round", joinstyle="round")
+                    c.create_text(x + T.s(38), cy2 + T.s(17), text=t, font=T.F(10, "bold"), fill=c.fade(T.ACCENT_D), anchor="w")
+                    x += wdt + T.s(12)
+            else:
+                c.text(cx, y + T.s(50), body, 11, fill=T.SUB, anchor="n", width=min(T.s(600), c.W - 2 * pad), justify="center")
             if s == 5:
                 yy = y + T.s(150)
                 for i, (val, lab) in enumerate(((len(self.apps), "apps found"), (self.added_apps, "apps in your inventory"),

@@ -20,15 +20,22 @@ NOISE = re.compile(
 
 
 def clean_apps(raw):
-    """raw: [(name, version, publisher)] -> sorted unique [(name, detail)] without runtimes/updates."""
+    """raw: [(name, version, publisher[, size_kb])] -> sorted unique [(name, detail, size_mb)]
+    without runtimes/updates."""
     seen, out = set(), []
-    for name, version, publisher in raw:
+    for row in raw:
+        name, version, publisher = row[0], row[1], row[2]
+        size_kb = row[3] if len(row) > 3 else 0
         name = (name or "").strip()
         if not name or NOISE.search(name) or name.lower() in seen:
             continue
         seen.add(name.lower())
         bits = [b for b in (publisher, f"v{version}" if version else "") if b]
-        out.append((name, "  \u00b7  ".join(bits)))
+        try:
+            mb = int(int(size_kb or 0) / 1024)
+        except (TypeError, ValueError):
+            mb = 0
+        out.append((name, "  \u00b7  ".join(bits), mb))
     return sorted(out, key=lambda t: t[0].lower())
 
 
@@ -78,13 +85,13 @@ def scan_apps():
                             if val(sk, "SystemComponent") == 1 or val(sk, "ParentKeyName") or \
                                     val(sk, "ReleaseType") in ("Update", "Hotfix", "Security Update"):
                                 continue
-                            raw.append((val(sk, "DisplayName"), val(sk, "DisplayVersion"), val(sk, "Publisher")))
+                            raw.append((val(sk, "DisplayName"), val(sk, "DisplayVersion"), val(sk, "Publisher"), val(sk, "EstimatedSize")))
                     except OSError:
                         continue
         except OSError:
             continue
     apps = clean_apps(raw)
-    known = [n.lower() for n, _ in apps]
+    known = [a[0].lower() for a in apps]
     menus = [os.path.join(os.environ.get("ProgramData", ""), r"Microsoft\Windows\Start Menu\Programs"),
              os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs")]
     extra = []
@@ -95,9 +102,9 @@ def scan_apps():
                 low = stem.lower()
                 if ext.lower() != ".lnk" or re.search(r"uninstall|readme|help|website|documentation|license|release notes", low):
                     continue
-                if any(low in k or k in low for k in known) or low in [e.lower() for e, _ in extra]:
+                if any(low in k or k in low for k in known) or low in [e[0].lower() for e in extra]:
                     continue
-                extra.append((stem, "Start Menu"))
+                extra.append((stem, "Start Menu", 0))
     return sorted(apps + extra, key=lambda t: t[0].lower())
 
 

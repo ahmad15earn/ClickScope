@@ -49,6 +49,12 @@ with one click, and writes `RECOVERY.txt` as an index. Nothing is installed auto
 - After the setup guide, the cursor gives a short tour of every tab (replay: Settings > *Replay tour*).
 
 ## 3b. What's new in this version
+- **Recovery-first redesign:** Home now shows recovery readiness instead of click totals; the Graphs tab and
+  vanity stats (busiest hour/day) are gone. Insights became recovery-centred (unprotected apps, unused software
+  and disk space, subscription reminders).
+- **Privacy up front:** the welcome screen states it plainly; `TRUST.md` + an automated check let anyone verify it.
+- **Resource-friendly:** Settings > *Count clicks in the background* can switch tracking off completely.
+
 - **Fixed:** the donut chart turning fully pink with many small slices (rings are now drawn as polygons).
 - **Inventory (new tab) and star:** clicks measure habit, not importance. Tap the star next to an app in
   Overview, answer the weekly check-in, or add an app by name (e.g. your backup tool). Export a
@@ -57,7 +63,7 @@ with one click, and writes `RECOVERY.txt` as an index. Nothing is installed auto
   week. Which belong in your recovery inventory?") and early insights. Full suggestions still unlock after
   30 days AND at least 7 active days.
 - **Back up / restore** your data (Settings), for a new PC or after reinstalling Windows.
-- **Close = keep running:** the X button minimizes; use *Quit ClickScope* in the sidebar to exit.
+- **Always on:** the X button hides the window; ClickScope keeps running and starts with Windows.
 - **Ignore list:** right-click a row in Overview to stop counting an app or website.
 
 ## 3c. Account and cloud backup (Account tab)
@@ -81,26 +87,30 @@ Optional Google sign-in (needs a Google Cloud OAuth client): create a Web OAuth 
 add `http://127.0.0.1:*/**` to Redirect URLs, then set `GOOGLE_ENABLED = True`.
 
 ## 4. Using ClickScope
-- **Overview**: total clicks (with change vs. the previous period), apps used,
-  websites, busiest hour, an activity chart (hover for exact numbers) and Most/Least
-  lists for apps and websites. Switch Today / 7 days / 30 days / All time.
-- **Graphs**: donut chart of where your clicks go (apps or websites), busiest
-  weekdays, and busiest hours of the day.
-- **Suggestions**: ClickScope first learns from **30 days** of your activity. Until
-  then you see a progress ring ("Day 4 of 30") and the unlock date. After day 30 you
-  get tips based on your last 30 days. *Clear all data* restarts the 30 days.
-- **Settings**: website tracking on/off, start with Windows, export CSV, open data
-  folder, preview with sample data, clear all data.
-- **Minimize** keeps tracking in the background. **Closing** the window quits.
-  **Pause** stops counting until you press Resume. The green dot pulses on every click.
-- Motion follows Windows: if "Show animations" is off, ClickScope skips the animations.
+ClickScope is a **recovery tool**. Click counting runs quietly in the background and is only used to discover
+which apps you rely on. There are no productivity graphs or vanity stats.
+- **Home**: how ready your PC is to recover (4 steps: scan, choose must-keep apps, back up, download
+  installers), what is protected, what is worth adding, and a list of your most-used apps with a star to protect them.
+- **Inventory**: your recovery list of apps and favourite websites; add by scan or by name; export a checklist.
+- **Recovery**: download official installers for your list into one folder, with progress and retry.
+- **Insights**: after 30 days, a few useful nudges: heavily used apps missing from your list (one-click *Add*),
+  installed apps that look unused and the disk space they could free, and paid subscriptions you have not opened.
+  Before day 30: a weekly check-in and early insights.
+- **Account**: optional email sign-in; backs up only your recovery list.
+- **Settings**: turn background counting off to save resources, start with Windows, backup/restore, ignore list,
+  setup guide, tour, export, clear data.
+- **Always on:** ClickScope runs quietly in the background and starts with Windows. The window's X just tucks it
+  into the taskbar; click its taskbar icon to open the dashboard again. There is no Quit button. To stop counting,
+  turn off *Count clicks in the background* in Settings, or use the uninstaller (it stops the app first).
+- Right-click a row to stop counting an app.
 
 ## 5. Privacy
-- Counts mouse clicks only. No keystrokes, screenshots, cursor paths or screen content.
-- Saves only daily totals per app / website and per hour of day, in
-  `%APPDATA%\ClickScope\clickscope.db`. Nothing is ever sent anywhere.
-- Websites come from the browser's **tab title** ("... - YouTube" becomes "YouTube"),
-  never the URL. Turn this off in Settings if you prefer.
+**Your click data never leaves your PC.** No keystrokes, no screenshots, nothing uploaded unless you sign in,
+and then only your recovery list. Don't take our word for it: see `TRUST.md` (the tracking code has no network
+code, and `python tests/test_no_network.py` proves it). MIT licensed. Details:
+- Saves only daily totals per app / website / hour in `%APPDATA%\ClickScope\clickscope.db`.
+- Websites are named from the browser's tab title, never the URL (the one-time browser-favourites import in the
+  setup guide, if you choose it, saves domain names only).
 - Clicks inside ClickScope and software-generated clicks are ignored.
 
 ## 6. Known limits

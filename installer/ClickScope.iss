@@ -20,10 +20,12 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=yes
+RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
-Name: "startup"; Description: "Start ClickScope when Windows starts"; GroupDescription: "Options:"; Flags: unchecked
+Name: "startup"; Description: "Start ClickScope when Windows starts (recommended: it runs quietly in the background)"; GroupDescription: "Options:"
 
 [Files]
 Source: "..\dist\ClickScope.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -37,3 +39,6 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\ClickScope.exe"; Description: "Launch ClickScope"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{sys}\taskkill.exe"; Parameters: "/f /im ClickScope.exe"; Flags: runhidden; RunOnceId: "StopClickScope"

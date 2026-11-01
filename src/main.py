@@ -51,7 +51,7 @@ def main():
     root = tk.Tk()
     root.title("ClickScope" + (" \u2013 Demo" if demo else ""))
     T.init(root)
-    root.geometry(f"{T.s(1120)}x{T.s(740)}")
+    root.geometry(f"{T.s(1120)}x{T.s(760)}")
     root.minsize(T.s(980), T.s(660))
     try:
         root.iconbitmap(resource_path("assets/app.ico"))
@@ -75,24 +75,33 @@ def main():
         store.first_run()  # starts the 30-day learning window on first launch
         tracker = Tracker(store)
         first_launch = store.get("onboarded") is None
+        tracker.paused = store.get("tracking", "1") == "0"
         if not first_launch:
             tracker.start()
 
-    def quit_app():
+    def quit_app():  # only used by demo mode and by --quit-for-tests
         tracker.stop()
         root.destroy()
 
     def on_close():
-        """The X button hides the window so tracking continues; Quit in the sidebar exits."""
+        """The X button never quits: ClickScope keeps running and the dashboard stays reachable from the taskbar."""
         if demo:
             return quit_app()
         if store.get("close_hint") != "1":
             store.set("close_hint", "1")
-            messagebox.showinfo("ClickScope", "ClickScope keeps counting in the background (minimized to the taskbar).\n\n"
-                                              "To exit completely, use \u201cQuit ClickScope\u201d in the sidebar.")
+            messagebox.showinfo("ClickScope", "ClickScope keeps running quietly in the background.\n"
+                                              "Open the dashboard any time from the taskbar.")
         root.iconify()
 
-    app = ui.App(root, store, tracker, demo=demo, on_quit=quit_app, on_ready=None if demo else tracker.start)
+    def on_ready():
+        """End of the first-run setup: start counting, and start with Windows so it is always on."""
+        tracker.start()
+        try:
+            ui.set_autostart(True)
+        except Exception:
+            pass
+
+    app = ui.App(root, store, tracker, demo=demo, on_quit=quit_app, on_ready=None if demo else on_ready)
     if not demo and first_launch:
         # first run: the guided setup scans the PC; click counting (and the 30 days) start when it ends
         app.start_setup(first_time=True)

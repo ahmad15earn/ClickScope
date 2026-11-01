@@ -198,7 +198,7 @@ class StatCard(Surface):
         super().__init__(parent, motion)
         self.title, self.sub, self.fmt = title, "", formatter or (lambda v: f"{int(round(v)):,}")
         self.num = Spring(motion, self, 0.0, response=0.7, eps=0.4)
-        self.label = None  # text mode (e.g. busiest hour)
+        self.label, self.color = None, None  # text mode (e.g. "Active")
 
     def set_number(self, v, sub=""):
         self.label = None
@@ -206,15 +206,15 @@ class StatCard(Surface):
         self.num.to(v)
         self.redraw()
 
-    def set_label(self, txt, sub=""):
-        self.label, self.sub = txt, sub
+    def set_label(self, txt, sub="", color=None):
+        self.label, self.sub, self.color = txt, sub, color
         self.redraw()
 
     def draw(self):
         pad = T.s(20)
         self.text(pad, T.s(18), self.title, 9, fill=T.SUB)
         self.text(pad, T.s(38), self.label if self.label is not None else self.fmt(self.num.value),
-                  22, "bold")
+                  22, "bold", fill=self.color or T.TEXT)
         if self.sub:
             self.text(pad, self.H - T.s(24), self.sub, 9, fill=T.SUB)
 
@@ -457,8 +457,9 @@ class DonutCard(Surface):
 
 # ---------------------------------------------------------------------- list
 class ListCard(Surface):
-    def __init__(self, parent, motion, title, on_mode, on_ignore=None, on_keep=None):
+    def __init__(self, parent, motion, title, on_mode, on_ignore=None, on_keep=None, toggles=True):
         super().__init__(parent, motion)
+        self.toggles = toggles
         self.title, self.mode, self.on_mode, self.on_ignore = title, "most", on_mode, on_ignore
         self.on_keep, self.kept = on_keep, set()
         self.bind("<Button-3>", self._right_click)
@@ -523,7 +524,7 @@ class ListCard(Surface):
         pad = T.s(22)
         self.text(pad, T.s(18), self.title, 12, "bold")
         x = self.W - pad
-        for m, label in (("least", "Least"), ("most", "Most")):
+        for m, label in ((("least", "Least"), ("most", "Most")) if self.toggles else ()):
             on = m == self.mode
             tw = measure(label, 9, "bold")
             rrect(self, x - tw - T.s(8), T.s(16), x + T.s(8), T.s(38), T.s(11),
@@ -634,19 +635,16 @@ class PillButton(tk.Canvas):
 
 # ------------------------------------------------------------------- sidebar
 class Sidebar(tk.Canvas):
-    ITEMS = [("overview", "Overview"), ("graphs", "Graphs"), ("inventory", "Inventory"),
-             ("recovery", "Recovery"), ("suggestions", "Suggestions"), ("account", "Account"),
-             ("settings", "Settings")]
+    ITEMS = [("overview", "Home"), ("inventory", "Inventory"), ("recovery", "Recovery"),
+             ("suggestions", "Insights"), ("account", "Account"), ("settings", "Settings")]
 
-    def __init__(self, parent, motion, on_select, on_pause, on_quit=None, logo=None, demo=False):
+    def __init__(self, parent, motion, on_select, on_pause, logo=None, demo=False):
         super().__init__(parent, bg=T.SIDEBAR, highlightthickness=0, bd=0)
         self.motion, self.on_select, self.logo, self.demo = motion, on_select, logo, demo
         self.active, self.hover, self.paused, self.W, self.H = 0, -1, False, 0, 0
         self.pill = Spring(motion, self, 0.0, response=0.32)
         self.ripple = Spring(motion, self, 1.0, response=0.7, eps=0.004)
         self.btn = PillButton(self, motion, "Pause", on_pause, style="dark", bg=T.SIDEBAR, width=T.s(150), h=T.s(34))
-        self.quit_btn = PillButton(self, motion, "Quit ClickScope", on_quit or (lambda: None), style="soft",
-                                   bg=T.SIDEBAR, width=T.s(150), h=T.s(34))
         self.bind("<Configure>", self._conf)
         self.bind("<Motion>", self._move)
         self.bind("<Leave>", lambda e: self._hover(-1))
@@ -724,7 +722,7 @@ class Sidebar(tk.Canvas):
             self.create_text(T.s(56), cy, text=label, font=T.F(10, "bold" if t > 0.5 else "normal"),
                              fill=mix(T.SUB, T.TEXT, t), anchor="w")
         # status
-        sy = H - T.s(136)
+        sy = H - T.s(92)
         dot = T.AMBER if self.paused else T.GREEN
         dx, r = T.s(28), T.s(5)
         rp = self.ripple.value
@@ -732,10 +730,9 @@ class Sidebar(tk.Canvas):
             rr = r + rp * T.s(9)
             self.create_oval(dx - rr, sy - rr, dx + rr, sy + rr, outline=mix(dot, T.SIDEBAR, rp), width=T.s(2))
         self.create_oval(dx - r, sy - r, dx + r, sy + r, fill=dot, outline="")
-        self.create_text(T.s(44), sy, text="Paused" if self.paused else "Tracking clicks",
+        self.create_text(T.s(44), sy, text="Paused" if self.paused else "Quietly tracking",
                          font=T.F(9, "bold"), fill=T.SUB, anchor="w")
-        self.create_window(T.s(22), H - T.s(112), window=self.btn, anchor="nw")
-        self.create_window(T.s(22), H - T.s(66), window=self.quit_btn, anchor="nw")
+        self.create_window(T.s(22), H - T.s(66), window=self.btn, anchor="nw")
 
 
 # ---------------------------------------------------------------- checklist

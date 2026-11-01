@@ -36,18 +36,31 @@ def test_store_and_stats():
 
 def test_suggestions():
     s = mk()
-    assert build_suggestions(s, "all")[0]["title"] == "Not enough activity yet"
-    for _ in range(130): s.add_click("Google Chrome", "YouTube")
-    for _ in range(10): s.add_click("Google Chrome", "Gmail")
-    for _ in range(10): s.add_click("VS Code")
-    for n in ("A","B","C"): s.add_click(n)
-    for _ in range(20): s.add_click("Word")
-    titles = [x["title"] for x in build_suggestions(s, "all")]
+    assert build_suggestions(s)[0]["title"] == "Your recovery list looks healthy"
+    s.set_catalog("app", [("Google Chrome", "G", 600), ("Visual Studio Code", "MS", 400), ("Adobe Premiere Pro", "Adobe", 8400),
+                          ("Old Game", "X", 62000), ("Backup Pro", "Acme", 90)])
+    s.set("first_run", (datetime.date.today() - datetime.timedelta(days=40)).isoformat())
+    for _ in range(300): s.add_click("Google Chrome", "YouTube")
+    for _ in range(120): s.add_click("VS Code")
+    s.toggle_keep("Visual Studio Code"); s.toggle_keep("Backup Pro")
+    sug = build_suggestions(s)
+    titles = [x["title"] for x in sug]
     print(titles)
-    assert any("browser" in t for t in titles)
-    assert any("YouTube" in t for t in titles)
-    assert any("Rarely" in t for t in titles)
-
+    assert "Google Chrome isn't in your recovery list" in titles
+    assert not any("VS Code" in x for x in titles), "VS Code matches the kept 'Visual Studio Code'"
+    assert any("look unused" in x for x in titles)
+    assert any(x["title"] == "Still paying for Adobe Premiere Pro?" for x in sug), titles
+    assert any(x["title"] == "Rarely clicked, still protected" for x in sug)
+    act = [x for x in sug if x.get("action")][0]["action"]
+    assert act["kind"] == "keep" and act["name"] == "Google Chrome"
+    un = {n: sz for n, sz, _ in s.unused_apps(30)}
+    assert un["Old Game"] == 62000 and "Visual Studio Code" not in un and "Backup Pro" not in un
+    assert not any(v for v in vars().values() if False)
+    # too little history: no unused/subscription claims
+    s2 = mk(); s2.set_catalog("app", [("Adobe Premiere Pro", "Adobe", 8400)])
+    assert s2.unused_apps(30) == [] and s2.subscription_alerts(30) == []
+    from core import same_app
+    assert same_app("VS Code", "Visual Studio Code") and same_app("Word", "Microsoft Word") and not same_app("Zoom", "Slack")
 
 
 def test_30_day_gate():
@@ -82,7 +95,7 @@ def test_scanner_and_catalog():
     import sqlite3, scanner
     apps = scanner.clean_apps([("Google Chrome", "126.0", "Google LLC"), ("Microsoft Visual C++ 2019 Redistributable (x64)", "14", "MS"),
                                ("Update for Windows (KB5001234)", "", ""), ("7-Zip", "23.01", "Igor Pavlov"), ("google chrome", "1", ""), ("", "", "")])
-    assert [a for a, _ in apps] == ["7-Zip", "Google Chrome"], apps
+    assert [a[0] for a in apps] == ["7-Zip", "Google Chrome"], apps
     assert scanner.domain_of("https://www.YouTube.com/watch?v=1") == "youtube.com"
     assert scanner.domain_of("http://192.168.0.1/x") is None and scanner.domain_of("http://localhost:3000") is None
     assert scanner.aggregate_domains([("https://github.com/a", 5), ("https://www.github.com/b", 3), ("https://x.org", 1)]) == [("github.com", 8), ("x.org", 1)]

@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox, simpledialog
 
 import theme as T
 from core import (ANALYSIS_DAYS, APP_DIR, MIN_ACTIVE_DAYS, build_suggestions, fmt_hour, quick_insights,
-                  resource_path, weekly_apps)
+                  resource_path, same_app, SYSTEM_LABELS, weekly_apps)
 import cloud
 import cloud_config
 import recovery as rec
@@ -22,13 +22,20 @@ from widgets import (AreaChartCard, BarChartCard, ChecklistCard, DonutCard, List
 
 RANGES = [("today", "Today"), ("7d", "7 days"), ("30d", "30 days"), ("all", "All time")]
 RANGE_NAME = {"today": "today", "7d": "the last 7 days", "30d": "the last 30 days", "all": "all time"}
-TITLES = {"overview": "Overview", "graphs": "Graphs", "inventory": "Inventory", "recovery": "Recovery", "account": "Account", "suggestions": "Suggestions", "settings": "Settings"}
+TITLES = {"overview": "Home", "inventory": "Inventory", "recovery": "Recovery", "account": "Account",
+          "suggestions": "Insights", "settings": "Settings"}
+TAGLINES = {"overview": "Your PC's safety net, built quietly in the background.",
+            "inventory": "What you must get back first, whatever the clicks say.",
+            "recovery": "Official installers, collected in one folder.",
+            "suggestions": "A few useful nudges. No vanity stats.",
+            "account": "Back up your list once, restore it on any PC.",
+            "settings": "Privacy and preferences."}
 HOUR_LABELS = ["12a", "1a", "2a", "3a", "4a", "5a", "6a", "7a", "8a", "9a", "10a", "11a",
                "12p", "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p", "10p", "11p"]
 DAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 DAY_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-SIDEBAR_W, HEADER_H = 220, 92
+SIDEBAR_W, HEADER_H = 220, 104
 
 
 def autostart_enabled():
@@ -61,55 +68,16 @@ def day_label(d):
     return f"{d.day} {d.strftime('%b')}"
 
 
-# ------------------------------------------------------------ data builders
-def activity_series(store, rng):
-    """values, labels, tips, subtitle, indices that get an x label."""
-    now = datetime.datetime.now()
-    if rng == "today":
-        hrs = store.hours("today")
-        n = now.hour + 1
-        vals = hrs[:n] + [None] * (24 - n)
-        tips = [f"{fmt_hour(h)}  \u00b7  {v:,} clicks" if v is not None else "" for h, v in enumerate(vals)]
-        return vals, HOUR_LABELS, tips, "Clicks per hour, today", {h for h in range(24) if h % 3 == 0}
-    if rng in ("7d", "30d"):
-        n = 7 if rng == "7d" else 30
-    else:
-        first = store.first_data_day()
-        n = int(clamp((datetime.date.today() - first).days + 1 if first else 7, 7, 120))
-    series = store.daily_series(n)
-    vals = [v for _, v in series]
-    labels = [DAY_SHORT[d.weekday()] if n <= 7 else day_label(d) for d, _ in series]
-    tips = [f"{d.strftime('%a')}, {day_label(d)}  \u00b7  {v:,} clicks" for d, v in series]
-    step = 1 if n <= 7 else 5 if n <= 30 else -(-n // 6)
-    show = {i for i in range(n) if (n - 1 - i) % step == 0}
-    sub = {"7d": "Clicks per day, last 7 days", "30d": "Clicks per day, last 30 days"}.get(rng, "Clicks per day, all time")
-    return vals, labels, tips, sub, show
-
-
-def delta_text(store, rng):
-    today, day = datetime.date.today(), datetime.timedelta
-    if rng == "today":
-        cur, prev, name = store.total("today"), store.total_between(today - day(1), today - day(1)), "yesterday"
-    elif rng == "7d":
-        cur, prev, name = store.total("7d"), store.total_between(today - day(13), today - day(7)), "previous 7 days"
-    elif rng == "30d":
-        cur, prev, name = store.total("30d"), store.total_between(today - day(59), today - day(30)), "previous 30 days"
-    else:
-        return ""
-    if prev <= 0:
-        return ""
-    pct = (cur - prev) / prev * 100
-    if prev < 100 or abs(pct) > 500:  # too little history to compare fairly
-        return ""
-    arrow = "\u2191" if pct >= 0 else "\u2193"
-    return f"{arrow} {abs(pct):.0f}% vs {name}"
-
-
-def top_with_others(store, kind, rng, keep=5):
-    rows = store.top(kind, rng)
-    if len(rows) <= keep + 1:
-        return rows
-    return rows[:keep] + [("Others", sum(n for _, n in rows[keep:]))]
+def toggle_protect(store, label):
+    """Add/remove an app (named by a tracked window label) to/from the recovery list; returns True if now kept."""
+    matches = [k for k in store.kept() if same_app(label, k)]
+    if matches:
+        for k in matches:
+            store.toggle_keep(k)
+        return False
+    cat = [n for n, _ in store.catalog("app") if same_app(label, n)]
+    store.toggle_keep(cat[0] if cat else label)
+    return True
 
 
 # -------------------------------------------------------------------- pages
@@ -136,101 +104,127 @@ class Page(tk.Frame):
         pass
 
 
-class OverviewPage(Page):
+class ReadinessCard(Surface):
+    """Recovery readiness: a progress ring plus the four steps that make a PC recoverable."""
+
+    def __init__(self, parent, motion):
+        super().__init__(parent, motion)
+        self.steps = []
+        self.ring = Spring(motion, self, 0.0, response=0.8, eps=0.002)
+        self.bind("<ButtonPress-1>", self._click)
+
+    def set_steps(self, steps):
+        self.steps = steps
+        self.ring.to(sum(1 for s in steps if s[2]) / max(len(steps), 1))
+        self.redraw()
+
+    def _row_y(self, i):
+        return T.s(184) + i * T.s(56)
+
+    def _click(self, e):
+        for i, (_, _, _, act) in enumerate(self.steps):
+            y = self._row_y(i)
+            if y - T.s(6) <= e.y <= y + T.s(48):
+                return act()
+
+    def draw(self):
+        pad = T.s(26)
+        done = sum(1 for s in self.steps if s[2])
+        total = max(len(self.steps), 1)
+        self.text(pad, T.s(20), "Recovery readiness", 12, "bold")
+        d, thick = T.s(92), T.s(11)
+        cx, cy = pad + d / 2, T.s(66) + d / 2
+        r = d / 2 - thick / 2
+        self.create_oval(cx - r, cy - r, cx + r, cy + r, outline=T.TRACK, width=thick)
+        deg = 360 * clamp(self.ring.value, 0, 1)
+        col = T.GREEN if done == total else T.ACCENT
+        if deg > 1:
+            ring_sector(self, cx, cy, r, thick, 0, min(deg, 359.9), self.fade(col))
+        self.text(cx, cy, f"{done}/{total}", 20, "bold", anchor="center", rise=False)
+        tx = cx + d / 2 + T.s(24)
+        head = "Ready to recover" if done == total else "Almost there" if done >= total - 1 else "Getting started"
+        sub = ("If your PC fails, you can be back up and running fast." if done == total else
+               "Finish the steps below so a crash never costs you your setup.")
+        self.text(tx, T.s(78), head, 16, "bold")
+        self.text(tx, T.s(104), sub, 10, fill=T.SUB, width=self.W - tx - pad)
+        for i, (title, sub, ok, _) in enumerate(self.steps):
+            y = self._row_y(i)
+            self.create_line(pad, y - T.s(8), self.W - pad, y - T.s(8), fill=T.LINE)
+            cx2, cy2, rr = pad + T.s(14), y + T.s(18), T.s(14)
+            if ok:
+                self.create_oval(cx2 - rr, cy2 - rr, cx2 + rr, cy2 + rr, fill=self.fade(T.GREEN), outline="")
+                self.create_line(cx2 - 5, cy2, cx2 - 1, cy2 + 4, cx2 + 6, cy2 - 4, fill="#FFFFFF", width=T.s(2.5),
+                                 capstyle="round", joinstyle="round")
+            else:
+                self.create_oval(cx2 - rr, cy2 - rr, cx2 + rr, cy2 + rr, outline=T.LINE2, width=T.s(2), fill=T.CARD)
+                self.text(cx2, cy2, str(i + 1), 10, "bold", fill=T.SUB, anchor="center", rise=False)
+            self.text(pad + T.s(42), y + T.s(2), title, 11, "bold", fill=T.SUB if ok else T.TEXT)
+            self.text(pad + T.s(42), y + T.s(24), sub, 9, fill=T.SUB)
+            ax = self.W - pad - T.s(6)
+            self.create_line(ax - 5, cy2 - 6, ax, cy2, ax - 5, cy2 + 6, fill=T.LINE2, width=T.s(2), capstyle="round", joinstyle="round")
+        py = self.H - T.s(28)
+        self.create_line(pad, py - T.s(16), self.W - pad, py - T.s(16), fill=T.LINE)
+        self.create_oval(pad, py - T.s(8), pad + T.s(16), py + T.s(8), fill=self.fade(T.ACCENT_SOFT), outline="")
+        self.create_line(pad + 4, py, pad + 7, py + 3, pad + 12, py - 3, fill=self.fade(T.ACCENT_D), width=T.s(2), capstyle="round", joinstyle="round")
+        self.text(pad + T.s(26), py, "Your click data never leaves this PC. No keystrokes, no screenshots.", 9, fill=T.SUB, anchor="w", rise=False)
+
+
+class HomePage(Page):
+    """Recovery-first home: what is protected, what is not, and what to do next."""
+
     def __init__(self, parent, app):
         super().__init__(parent, app)
         m = app.motion
-        self.s_total = StatCard(self, m, "Total clicks")
-        self.s_apps = StatCard(self, m, "Apps used")
-        self.s_sites = StatCard(self, m, "Websites")
-        self.s_peak = StatCard(self, m, "Busiest hour")
-        self.chart = AreaChartCard(self, m, "Activity")
-        self.apps = ListCard(self, m, "Applications", self.update_data, lambda n: self._ignore("app", n), self._keep)
-        self.sites = ListCard(self, m, "Websites", self.update_data, lambda n: self._ignore("site", n))
-        self.cards = [self.s_total, self.s_apps, self.s_sites, self.s_peak, self.chart, self.apps, self.sites]
+        self.s_prot = StatCard(self, m, "Protected apps")
+        self.s_add = StatCard(self, m, "Worth adding")
+        self.s_cloud = StatCard(self, m, "Cloud backup")
+        self.s_track = StatCard(self, m, "Background tracking")
+        self.ready = ReadinessCard(self, m)
+        self.list = ListCard(self, m, "Worth protecting", lambda: None, None, self._keep, toggles=False)
+        self.cards = [self.s_prot, self.s_add, self.s_cloud, self.s_track, self.ready, self.list]
 
-    def _keep(self, name):
-        self.app.store.toggle_keep(name)
+    def _keep(self, label):
+        toggle_protect(self.app.store, label)
         self.update_data()
-
-    def _ignore(self, kind, name):
-        if messagebox.askyesno("ClickScope", f"Stop counting clicks in \u201c{name}\u201d?\n\nIts existing counts are removed too. "
-                                              "You can undo this in Settings > Reset ignore list."):
-            self.app.store.add_ignore(kind, name)
-            self.app.refresh()
 
     def layout(self, w, h):
         P, G = T.s(32), T.s(16)
         iw = w - 2 * P
         cw = (iw - 3 * G) // 4
         sh = T.s(112)
-        for i, c in enumerate((self.s_total, self.s_apps, self.s_sites, self.s_peak)):
+        for i, c in enumerate((self.s_prot, self.s_add, self.s_cloud, self.s_track)):
             c.place(x=P + i * (cw + G), y=0, width=cw, height=sh)
-        remaining = h - sh - 2 * G - T.s(26)
-        ch = int(clamp(remaining * 0.40, T.s(200), T.s(280)))
-        self.chart.place(x=P, y=sh + G, width=iw, height=ch)
-        ly = sh + 2 * G + ch
-        lw = (iw - G) // 2
-        lh = max(T.s(200), h - ly - T.s(26))
-        self.apps.place(x=P, y=ly, width=lw, height=lh)
-        self.sites.place(x=P + lw + G, y=ly, width=lw, height=lh)
-        cap = max(3, (lh - T.s(64) - T.s(30)) // T.s(46))
-        self.apps.capacity = self.sites.capacity = cap
+        ly, lh = sh + G, max(T.s(300), h - sh - G - T.s(26))
+        lw = int(iw * 0.52)
+        self.ready.place(x=P, y=ly, width=lw, height=lh)
+        self.list.place(x=P + lw + G, y=ly, width=iw - lw - G, height=lh)
+        self.list.capacity = max(3, (lh - T.s(64) - T.s(30)) // T.s(46))
 
     def update_data(self):
-        st, r = self.app.store, self.app.rng
-        self.apps.kept = set(st.kept())
-        self.s_total.set_number(st.total(r), delta_text(st, r))
-        apps, sites = st.top("app", r, 1), st.top("site", r, 1)
-        self.s_apps.set_number(st.count("app", r), f"Top: {apps[0][0]}" if apps else "No clicks yet")
-        off = st.get("track_sites", "1") != "1"
-        self.s_sites.set_number(st.count("site", r),
-                                f"Top: {sites[0][0]}" if sites else ("Tracking is off" if off else "No clicks yet"))
-        ph = st.busiest_hour(r)
-        self.s_peak.set_label(fmt_hour(ph), "Most clicks" if ph is not None else "No clicks yet")
-        vals, labels, tips, sub, show = activity_series(st, r)
-        self.chart.set_data(vals, labels, tips, sub, show)
-        for kind, card, empty in (
-                ("app", self.apps, "No clicks yet. Use your PC as usual and they will show up here."),
-                ("site", self.sites, "Website tracking is turned off in Settings." if off
-                 else "No website clicks yet. Click around in your browser.")):
-            card.set_rows(st.top(kind, r, card.capacity, desc=(card.mode == "most")), empty)
-
-
-class GraphsPage(Page):
-    def __init__(self, parent, app):
-        super().__init__(parent, app)
-        m = app.motion
-        self.kind = "app"
-        self.donut = DonutCard(self, m, self._kind)
-        self.week = BarChartCard(self, m, "Busiest days")
-        self.hours = BarChartCard(self, m, "Busiest hours")
-        self.cards = [self.donut, self.week, self.hours]
-
-    def _kind(self, k):
-        self.kind = k
-        self.update_data()
-
-    def layout(self, w, h):
-        P, G = T.s(32), T.s(16)
-        iw = w - 2 * P
-        top_h = int(clamp((h - G - T.s(26)) * 0.5, T.s(230), T.s(330)))
-        dw = int(iw * 0.6)
-        self.donut.place(x=P, y=0, width=dw, height=top_h)
-        self.week.place(x=P + dw + G, y=0, width=iw - dw - G, height=top_h)
-        self.hours.place(x=P, y=top_h + G, width=iw, height=max(T.s(200), h - top_h - G - T.s(26)))
-
-    def update_data(self):
-        st, r = self.app.store, self.app.rng
-        items = top_with_others(st, self.kind, r)
-        total = st.total(r) if self.kind == "app" else sum(n for _, n in st.top("site", r))
-        self.donut.set_items(items, self.kind, total)
-        wd = st.weekday_totals(r)
-        self.week.set_data(wd, DAY_SHORT, [f"{DAY_FULL[i]}  \u00b7  {v:,} clicks" for i, v in enumerate(wd)],
-                           f"Total clicks per weekday, {RANGE_NAME[r]}", set(range(7)))
-        hrs = st.hours(r)
-        self.hours.set_data(hrs, HOUR_LABELS, [f"{fmt_hour(h)}  \u00b7  {v:,} clicks" for h, v in enumerate(hrs)],
-                            f"When you click most, {RANGE_NAME[r]}", {h for h in range(24) if h % 3 == 0})
+        a, st = self.app, self.app.store
+        kept, ksites = st.kept(), st.kept_sites()
+        self.s_prot.set_number(len(kept), f"{len(ksites)} favourite site{'s' if len(ksites) != 1 else ''}")
+        fu = st.frequent_unprotected(10)
+        self.s_add.set_number(len(fu), "used often, not in your list" if fu else "Everything covered")
+        if cloud.configured() and cloud.signed_in(st):
+            last = st.get("cloud_last_sync", "")
+            self.s_cloud.set_label("On", f"Last synced {last[-5:]}" if last else "Syncing\u2026", T.GREEN)
+        else:
+            self.s_cloud.set_label("Off", "Sign in to back up" if cloud.configured() else "Not set up", T.AMBER)
+        trk = getattr(a.tracker, "paused", False)
+        off = st.get("tracking", "1") == "0"
+        self.s_track.set_label("Off" if off else "Paused" if trk else "Active",
+                               f"{st.total('today'):,} clicks today" if not off else "Saves resources",
+                               T.FAINT if off else (T.AMBER if trk else T.GREEN))
+        steps = [("Scan this PC", "Find every app installed here", bool(st.catalog("app")), lambda: a.start_setup(False, 1)),
+                 ("Choose your must-keep apps", "Mark what you would want back first", bool(kept), lambda: a.show("inventory")),
+                 ("Back up your list", "Sign in so a new PC can restore it",
+                  bool(cloud.configured() and cloud.signed_in(st) and st.get("cloud_last_sync")), lambda: a.show("account")),
+                 ("Download your installers", "Collect them in one folder", bool(st.get("recovery_done")), lambda: a.show("recovery"))]
+        self.ready.set_steps(steps)
+        rows = [(n, c) for n, c in st.top("app", "30d", 20) if n not in SYSTEM_LABELS and c >= 10][: self.list.capacity]
+        self.list.kept = {n for n, _ in rows if any(same_app(n, k) for k in kept)}
+        self.list.set_rows(rows, "Use your PC as usual. The apps you rely on will show up here.")
 
 
 class LearningCard(Surface):
@@ -362,15 +356,18 @@ class CheckinCard(Surface):
 
 
 class SuggestionCard(Surface):
-    def __init__(self, parent, motion, item):
+    def __init__(self, parent, motion, item, on_action=None):
         super().__init__(parent, motion)
         self.item = item
+        self.btn = None
+        if item.get("action") and on_action:
+            self.btn = PillButton(self, motion, item["action"]["label"], lambda: on_action(item), "dark", h=T.s(34))
 
     @staticmethod
     def height_for(item, width):
-        avail = width - T.s(24 + 52 + 24)
+        avail = width - T.s(24 + 52 + 24) - (T.s(210) if item.get("action") else 0)
         lines = max(1, math.ceil(measure(item["text"], 10) * 1.06 / max(avail, 60)))
-        return T.s(26) + line_height(12, "bold") + T.s(6) + lines * line_height(10) + T.s(22)
+        return max(T.s(92), T.s(26) + line_height(12, "bold") + T.s(6) + lines * line_height(10) + T.s(22))
 
     def draw(self):
         it, pad = self.item, T.s(24)
@@ -395,7 +392,10 @@ class SuggestionCard(Surface):
             self.create_polygon(pts, fill=c, outline="")
         x = pad + T.s(52)
         self.text(x, pad - T.s(2), it["title"], 12, "bold")
-        self.text(x, pad + line_height(12, "bold") + T.s(4), it["text"], 10, fill=T.SUB, width=self.W - x - pad)
+        bw = (self.btn.w + T.s(20)) if self.btn else 0
+        self.text(x, pad + line_height(12, "bold") + T.s(4), it["text"], 10, fill=T.SUB, width=self.W - x - pad - bw)
+        if self.btn:
+            self.create_window(self.W - pad, (self.H - self.btn.h) / 2, window=self.btn, anchor="ne")
 
 
 class SuggestionsPage(Page):
@@ -407,7 +407,14 @@ class SuggestionsPage(Page):
         self.cards = [self.learning, self.checkin]
 
     def _toggle(self, name):
-        self.app.store.toggle_keep(name)
+        toggle_protect(self.app.store, name)
+        self.update_data()
+
+    def _action(self, item):
+        act = item["action"]
+        if act["kind"] == "keep":
+            toggle_protect(self.app.store, act["name"])
+        self.sig = None
         self.update_data()
 
     def layout(self, w, h):
@@ -445,7 +452,9 @@ class SuggestionsPage(Page):
                 self.layout(self.W, self.H)
             self.ready, self.sig, self.cards = False, None, [self.learning, self.checkin]
             self.learning.set_progress(day, unlock, day >= ANALYSIS_DAYS, st.active_days())
-            self.checkin.set_data(day, quick_insights(st), weekly_apps(st), st.kept())
+            wk = weekly_apps(st)
+            kl = [n for n in wk if any(same_app(n, k) for k in st.kept())]
+            self.checkin.set_data(day, quick_insights(st), wk, kl)
             self.layout(self.W, self.H)
             return
         sug = build_suggestions(st, "30d")
@@ -455,7 +464,7 @@ class SuggestionsPage(Page):
         self.sig, self.ready = sig, True
         for c in self.items:
             c.destroy()
-        self.items = [SuggestionCard(self, self.app.motion, it) for it in sug]
+        self.items = [SuggestionCard(self, self.app.motion, it, self._action) for it in sug]
         self.cards = list(self.items)
         self.layout(self.W, self.H)
         for i, c in enumerate(self.items):
@@ -696,6 +705,8 @@ class RecoveryPage(Page):
         else:
             self._ticking = False
             self.app.store.set("winget_ids", json.dumps(self.mgr.ids))
+            if self.mgr.counts().get(rec.DONE):
+                self.app.store.set("recovery_done", datetime.date.today().isoformat())
 
     # ---- events
     def _max_scroll(self):
@@ -967,12 +978,13 @@ class SettingsPage(Page):
         m, st = app.motion, app.store
         self.general, self.data, self.privacy = Surface(self, m), Surface(self, m), Surface(self, m)
         self.cards = [self.general, self.data, self.privacy]
-        self.on = [st.get("track_sites", "1") == "1", autostart_enabled()]
+        self.on = [st.get("tracking", "1") == "1", st.get("track_sites", "1") == "1", autostart_enabled()]
         self.knob = [Spring(m, self.general, 1.0 if v else 0.0, response=0.25) for v in self.on]
-        self.rows = [("Count clicks per website", "Uses the browser tab title to name the site, never the URL."),
+        self.rows = [("Count clicks in the background", "Only used to spot the apps you rely on. Turn off to save resources."),
+                     ("Name websites in browsers", "Uses the browser tab title to name the site, never the URL."),
                      ("Start with Windows", "Launches minimized so tracking runs in the background.")]
         self.general.draw, self.data.draw, self.privacy.draw = self._draw_general, self._draw_data, self._draw_privacy
-        for i in range(2):
+        for i in range(3):
             tag = f"tg{i}"
             self.general.tag_bind(tag, "<ButtonPress-1>", lambda e, i=i: self._toggle(i))
             self.general.tag_bind(tag, "<Enter>", lambda e: self.general.config(cursor="hand2"))
@@ -990,22 +1002,29 @@ class SettingsPage(Page):
     def layout(self, w, h):
         P, G = T.s(32), T.s(16)
         iw = w - 2 * P
-        gh, dh = T.s(168), T.s(270)
+        gh, dh = T.s(228), T.s(250)
         self.general.place(x=P, y=0, width=iw, height=gh)
         self.data.place(x=P, y=gh + G, width=iw, height=dh)
-        self.privacy.place(x=P, y=gh + dh + 2 * G, width=iw, height=T.s(160))
+        self.privacy.place(x=P, y=gh + dh + 2 * G, width=iw, height=T.s(150))
 
     def _toggle(self, i):
         self.on[i] = not self.on[i]
         self.knob[i].to(1.0 if self.on[i] else 0.0)
         if i == 0:
-            self.app.store.set("track_sites", "1" if self.on[0] else "0")
+            tr = self.app.tracker
+            self.app.store.set("tracking", "1" if self.on[0] else "0")
+            tr.paused = not self.on[0]
+            if self.on[0] and hasattr(tr, "start"):
+                tr.start()
+            self.app.sidebar.set_paused(tr.paused)
+        elif i == 1:
+            self.app.store.set("track_sites", "1" if self.on[1] else "0")
         else:
             try:
-                set_autostart(self.on[1])
+                set_autostart(self.on[2])
             except Exception as e:
-                self.on[1] = not self.on[1]
-                self.knob[1].to(1.0 if self.on[1] else 0.0)
+                self.on[2] = not self.on[2]
+                self.knob[2].to(1.0 if self.on[2] else 0.0)
                 messagebox.showerror("ClickScope", f"Could not change the startup setting:\n{e}")
 
     def _draw_general(self):
@@ -1047,8 +1066,8 @@ class SettingsPage(Page):
                "title. If you choose it in the setup guide, it also reads your bookmarks and most-visited domains once; "
                "only domain names are saved.\n\n"
                "Only totals are saved: per day, per app and per website. Clicks inside ClickScope are ignored. "
-               "Closing the window keeps ClickScope counting in the background (minimized). "
-               "Use Quit ClickScope in the sidebar to exit completely.")
+               "ClickScope runs quietly in the background all the time: closing the window just tucks it into the taskbar. "
+               "Verify it yourself: the tracking code (winhook.py and core.py) has no network code. See TRUST.md.")
         c.text(pad, T.s(46), msg, 10, fill=T.SUB, width=c.W - 2 * pad)
 
     def _export(self):
@@ -1109,7 +1128,7 @@ class SettingsPage(Page):
 
 # ---------------------------------------------------------------------- app
 class App:
-    def __init__(self, root, store, tracker, demo=False, size=(1120, 740), on_quit=None, on_ready=None):
+    def __init__(self, root, store, tracker, demo=False, size=(1120, 760), on_quit=None, on_ready=None):
         T.init(root)
         self.root, self.store, self.tracker, self.demo = root, store, tracker, demo
         self.on_quit = on_quit or root.destroy
@@ -1125,15 +1144,12 @@ class App:
             self.logo = tk.PhotoImage(file=resource_path("assets/logo_128.png" if T.SCALE >= 1.4 else "assets/logo_64.png"))
         except Exception:
             pass
-        self.sidebar = Sidebar(root, self.motion, self.show, self.toggle_pause, self.on_quit, logo=self.logo, demo=demo)
+        self.sidebar = Sidebar(root, self.motion, self.show, self.toggle_pause, logo=self.logo, demo=demo)
         self.main = tk.Frame(root, bg=T.BG)
         self.header = tk.Canvas(self.main, bg=T.BG, highlightthickness=0, bd=0)
         self.title_reveal = Spring(self.motion, self, 1.0, response=0.5)
-        self.seg = Segmented(self.main, self.motion, RANGES, self.set_range, seg_w=T.s(78), h=T.s(32), bg=T.BG)
-        self.seg.select(self.rng, silent=True)
-        self.seg.pos.jump(self.seg.sel)
         self.stage = tk.Frame(self.main, bg=T.BG)
-        self.pages = {"overview": OverviewPage(self.stage, self), "graphs": GraphsPage(self.stage, self),
+        self.pages = {"overview": HomePage(self.stage, self),
                       "inventory": InventoryPage(self.stage, self),
                       "recovery": RecoveryPage(self.stage, self), "account": AccountPage(self.stage, self), "suggestions": SuggestionsPage(self.stage, self), "settings": SettingsPage(self.stage, self)}
         self._geom = (0, 0)
@@ -1193,11 +1209,10 @@ class App:
                 ghost.close()
 
     # ---- the guided tour: the ghost cursor clicks each tab and explains it
-    TOUR = {"overview": "Overview shows your clicks, busiest hours and most-used apps.",
-            "graphs": "Graphs turn it into charts. Hover over them for details.",
+    TOUR = {"overview": "Home shows how ready your PC is to recover, and what to protect next.",
             "inventory": "Inventory is your recovery list: apps and sites you can't lose.",
             "recovery": "Recovery downloads those installers into one folder for you.",
-            "suggestions": "Suggestions unlock after 30 days. Weekly check-ins start before that.",
+            "suggestions": "Insights spots unprotected apps, unused software and subscriptions.",
             "account": "Account backs up your recovery list, so a new PC can restore it.",
             "settings": "Settings has backup, the ignore list and your privacy options."}
 
@@ -1234,13 +1249,10 @@ class App:
         h = self.header
         h.delete("all")
         t = clamp(self.title_reveal.value, 0, 1)
-        h.create_text(T.s(32), T.s(50) + (1 - t) * T.s(8), text=TITLES[self.tab], font=T.F(24, "bold"),
+        h.create_text(T.s(32), T.s(42) + (1 - t) * T.s(8), text=TITLES[self.tab], font=T.F(24, "bold"),
                       fill=mix(T.BG, T.TEXT, t), anchor="w")
-        W = self._geom[0] or self.size[0]
-        if self.tab in ("overview", "graphs"):
-            self.seg.place(x=W - T.s(SIDEBAR_W) - T.s(32) - (self.seg.sw * len(RANGES) + 4), y=T.s(30))
-        else:
-            self.seg.place_forget()
+        h.create_text(T.s(32), T.s(74) + (1 - t) * T.s(8), text=TAGLINES[self.tab], font=T.F(10),
+                      fill=mix(T.BG, T.SUB, t), anchor="w")
 
     # ---- navigation
     def show(self, key):
@@ -1256,10 +1268,6 @@ class App:
         self.title_reveal.to(1)
         self.redraw()
         self.pages[key].enter()
-
-    def set_range(self, key):
-        self.rng = key
-        self.refresh()
 
     def toggle_pause(self):
         self.tracker.paused = not self.tracker.paused
