@@ -1,0 +1,108 @@
+"""Installer heuristics: old setup files, duplicate versions, safe picks."""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "src"))
+
+import installers as I
+
+NOW = 1_800_000_000
+
+
+class FakeIndex:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def has_data(self):
+        return bool(self.rows)
+
+    def installer_rows(self):
+        return [dict(path=p, size=s, mtime=m) for p, s, m in self.rows]
+
+
+def row(path, size, age_days):
+    return path, size, int(NOW - age_days * 86400)
+
+
+def test_name_heuristics():
+    assert I.looks_like_installer("AppSetup.exe", r"C:\Users\Alex\Downloads\AppSetup.exe", 2_000_000,
+                                  skip_system=False)
+    assert I.looks_like_installer("PhotoStudio_2024.1_win64.exe",
+                                  r"C:\Users\Alex\Downloads\PhotoStudio_2024.1_win64.exe", 2_000_000,
+                                  skip_system=False)
+    assert I.looks_like_installer("driver.msi", r"C:\Users\Alex\Downloads\driver.msi", 100,
+                                  skip_system=False)
+    assert not I.looks_like_installer("unins000.exe", r"C:\Users\Alex\Downloads\unins000.exe", 2_000_000,
+                                      skip_system=False)
+    assert not I.looks_like_installer("holiday.jpg", r"C:\Users\Alex\Pictures\holiday.jpg", 2_000_000,
+                                      skip_system=False)
+    assert not I.looks_like_installer("random-tool.exe", r"C:\Users\Alex\Downloads\random-tool.exe",
+                                      2_000_000, skip_system=False)
+    assert not I.looks_like_installer("AppSetup.exe", r"C:\Program Files\App\AppSetup.exe", 2_000_000)
+    assert I.looks_like_installer("AppSetup.exe", r"C:\Program Files\App\AppSetup.exe", 2_000_000,
+                                  skip_system=False)
+
+
+def test_normalize_name():
+    a = I.normalize_name("PhotoStudio_2024.1_win64.exe")
+    b = I.normalize_name("PhotoStudio_2023.2_win64.exe")
+    assert a == b == "photostudio", (a, b)
+    assert I.normalize_name("App Setup v1.3.exe") == I.normalize_name("App Setup v1.2.exe") == "app setup"
+
+
+def test_find_duplicates_and_safe_picks():
+    rows = [
+        row(r"C:\Users\Alex\Downloads\Installers\PhotoStudio_2024.1_win64.exe", 700_000_000, 400),
+        row(r"C:\Users\Alex\Downloads\Installers\PhotoStudio_2023.2_win64.exe", 710_000_000, 700),
+        row(r"C:\Users\Alex\Desktop\OldGameSetup.exe", 1_800_000_000, 760),
+        row(r"C:\Users\Alex\Downloads\unins000.exe", 2_000_000, 900),
+        row(r"C:\Users\Alex\Downloads\random-tool.exe", 1_000_000, 500),
+        row(r"C:\Users\Alex\Downloads\AppSetup_1.0_x64.exe", 50_000_000, 5),
+    ]
+    items = I.find_installers(index=FakeIndex(rows), now=NOW, min_age_days=30, min_bytes=0,
+                              skip_system=False)
+    names = [i["name"] for i in items]
+    assert "unins000.exe" not in names, names
+    assert "random-tool.exe" not in names, names
+    assert "AppSetup_1.0_x64.exe" not in names, names
+    newest = next(i for i in items if i["name"] == "PhotoStudio_2024.1_win64.exe")
+    older = next(i for i in items if i["name"] == "PhotoStudio_2023.2_win64.exe")
+    assert not newest["duplicate_of"]
+    assert older["duplicate_of"] == newest["name"]
+    assert older["reason"] == "Older copy"
+    assert newest["reason"] == "Older than a year"
+    assert older["age_text"] and older["size_text"]
+
+    safe = set(I.safe_selection(items))
+    assert older["path"] in safe and newest["path"] in safe
+    assert next(i for i in items if i["name"] == "OldGameSetup.exe")["path"] in safe
+
+    summary = I.summary(items)
+    assert summary["count"] == len(items)
+    assert summary["bytes"] == sum(i["size"] for i in items)
+    assert summary["duplicates"] == 1
+
+    recent_only = I.find_installers(index=FakeIndex(rows), now=NOW, min_age_days=750, min_bytes=0,
+                                    skip_system=False)
+    assert [i["name"] for i in recent_only] == ["OldGameSetup.exe"], recent_only
+
+
+def test_remove_uses_recycle_bin():
+    seen = []
+    original = I.recycle_bin
+    I.recycle_bin = lambda paths: (seen.extend(paths) or len(paths), [])
+    try:
+        moved, failed = I.remove([r"C:\Users\Alex\Downloads\Old.exe"])
+    finally:
+        I.recycle_bin = original
+    assert (moved, failed) == (1, [])
+    assert seen == [r"C:\Users\Alex\Downloads\Old.exe"]
+
+
+if __name__ == "__main__":
+    test_name_heuristics()
+    test_normalize_name()
+    test_find_duplicates_and_safe_picks()
+    test_remove_uses_recycle_bin()
+    print("installers tests OK")

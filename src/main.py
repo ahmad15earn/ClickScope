@@ -1,7 +1,14 @@
-"""ClickScope entry point.  Flags: --minimized (start in taskbar), --demo (sample data, no tracking)."""
+"""ClickScope entry point.
+
+Flags:
+  --minimized   start in the taskbar (used by "Start with Windows")
+  --demo        use a separate sample-safe folder instead of your real index
+  --smoke       close automatically after a moment (development check)
+"""
 import ctypes
 import os
 import sys
+import tempfile
 import tkinter as tk
 from tkinter import messagebox
 
@@ -10,24 +17,37 @@ _mutex = None
 
 def _single_instance(name):
     global _mutex
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    k32.CreateMutexW.restype = ctypes.c_void_p
-    _mutex = k32.CreateMutexW(None, False, name)
-    return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+    if not sys.platform == "win32":
+        return True
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        _mutex = k32.CreateMutexW(None, False, name)
+        return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+    except Exception:
+        return True
 
 
-class DemoTracker:
-    paused = False
-    click_count = 0
-
-    def stop(self):
-        pass
+def _center(root, width, height):
+    try:
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w, h = min(width, sw - 60), min(height, sh - 80)
+        x, y = max(0, (sw - w) // 2), max(0, (sh - h) // 2 - 20)
+        root.geometry(f"{w}x{h}+{x}+{y}")
+    except Exception:
+        root.geometry(f"{width}x{height}")
 
 
 def main():
     demo = "--demo" in sys.argv
+    if demo and "CLICKSCOPE_HOME" not in os.environ:
+        os.environ["CLICKSCOPE_HOME"] = os.path.join(tempfile.gettempdir(), "ClickScopeDemo")
+    if "--smoke" in sys.argv and "CLICKSCOPE_HOME" not in os.environ:
+        os.environ["CLICKSCOPE_HOME"] = os.path.join(tempfile.gettempdir(), "ClickScopeSmoke")
+
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ClickScope.Demo" if demo else "ClickScope.App")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "ClickScope.Demo" if demo else "ClickScope.App")
     except Exception:
         pass
     try:
@@ -38,78 +58,49 @@ def main():
         except Exception:
             pass
 
-    if not _single_instance("Local\\ClickScopeDemo" if demo else "Local\\ClickScopeSingleInstance"):
+    if not _single_instance("Local\\ClickScope2Demo" if demo else "Local\\ClickScope2SingleInstance"):
         r = tk.Tk()
         r.withdraw()
         messagebox.showinfo("ClickScope", "ClickScope is already running.\nCheck your taskbar.")
+        r.destroy()
         return
 
+    import appdata as A
     import theme as T
     import ui
-    from core import APP_DIR, Store, resource_path, seed_demo
 
+    A.ensure_dirs()
     root = tk.Tk()
-    root.title("ClickScope" + (" \u2013 Demo" if demo else ""))
+    root.withdraw()
     T.init(root)
-    root.geometry(f"{T.s(1120)}x{T.s(760)}")
-    root.minsize(T.s(980), T.s(660))
+    root.title("ClickScope" + (" \u2013 Demo" if demo else ""))
+    _center(root, T.s(1210), T.s(825))
+    root.minsize(min(T.s(1020), root.winfo_screenwidth() - 60),
+                 min(T.s(700), root.winfo_screenheight() - 80))
+
+    state = A.State()
+    index = ui_index = None
     try:
-        root.iconbitmap(resource_path("assets/app.ico"))
-    except Exception:
-        pass
-
-    if demo:
-        os.makedirs(APP_DIR, exist_ok=True)
-        path = os.path.join(APP_DIR, "demo.db")
-        for suffix in ("", "-wal", "-shm"):
-            try:
-                os.remove(path + suffix)
-            except OSError:
-                pass
-        store = Store(path)
-        seed_demo(store)
-        tracker = DemoTracker()
-    else:
-        from winhook import Tracker
-        store = Store()
-        store.first_run()  # starts the 30-day learning window on first launch
-        tracker = Tracker(store)
-        first_launch = store.get("onboarded") is None
-        tracker.paused = store.get("tracking", "1") == "0"
-        if not first_launch:
-            tracker.start()
-
-    def quit_app():  # only used by demo mode and by --quit-for-tests
-        tracker.stop()
+        from filesearch import FileIndex
+        index = ui_index = FileIndex(extra_roots=state.index_roots())
+    except Exception as e:
+        messagebox.showerror("ClickScope", f"ClickScope could not open its local index:\n{e}")
         root.destroy()
+        return
 
-    def on_close():
-        """The X button never quits: ClickScope keeps running and the dashboard stays reachable from the taskbar."""
-        if demo:
-            return quit_app()
-        if store.get("close_hint") != "1":
-            store.set("close_hint", "1")
-            messagebox.showinfo("ClickScope", "ClickScope keeps running quietly in the background.\n"
-                                              "Open the dashboard any time from the taskbar.")
+    app = ui.App(root, state, index)
+    root.deiconify()
+    if "--minimized" in sys.argv:
         root.iconify()
-
-    def on_ready():
-        """End of the first-run setup: start counting, and start with Windows so it is always on."""
-        tracker.start()
+    if "--smoke" in sys.argv:
+        root.after(1800, app.quit)
+    try:
+        root.mainloop()
+    finally:
         try:
-            ui.set_autostart(True)
+            ui_index.close()
         except Exception:
             pass
-
-    app = ui.App(root, store, tracker, demo=demo, on_quit=quit_app, on_ready=None if demo else on_ready)
-    if not demo and first_launch:
-        # first run: the guided setup scans the PC; click counting (and the 30 days) start when it ends
-        app.start_setup(first_time=True)
-    elif "--minimized" in sys.argv and not demo:
-        root.iconify()
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
-    root.mainloop()
 
 
 if __name__ == "__main__":
