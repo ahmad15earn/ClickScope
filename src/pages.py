@@ -11,8 +11,9 @@ import blueprint as B
 import installers as I
 import theme as T
 from motion import Spring, clamp, mix
-from uikit import (Button, Card, Chips, IconButton, ResultsView, SearchField, Switch, circle, draw_duo,
-                   draw_file_icon, draw_glyph, ellipsize, line_height, measure, middle_ellipsize, photo, rr)
+from uikit import (Button, Card, Chips, IconButton, ResultsView, SearchField, Switch, circle,
+                   draw_file_icon, draw_glyph, draw_icon, ellipsize, line_height, measure,
+                   middle_ellipsize, photo, rr)
 
 
 def count(n):
@@ -184,7 +185,7 @@ class SearchIntro(Card):
         # privacy at the bottom
         py = H - T.s(45)
         if py > T.s(175):
-            draw_glyph(self, "info", pad + T.s(7), py, T.FAINT, T.s(13), width=T.s(1.4))
+            draw_icon(self, "info", pad + T.s(7), py, T.s(13), T.FAINT)
             self.create_text(pad + T.s(20), py, text="Names, sizes and dates only. Never file contents.",
                              font=T.F(8), fill=T.FAINT, anchor="w")
         # places
@@ -202,8 +203,7 @@ class SearchIntro(Card):
                 break
             hot = i == self.hover
             rr(self, x, y, x + tw, y + th, T.s(11), fill=T.HOVER if hot else T.TRACK, outline="")
-            draw_duo(self, "folder", x + T.s(18), y + T.s(21), T.s(17), primary=T.FOLDER_INK,
-                     secondary=mix(T.FOLDER_INK, "#FFFFFF", 0.7), bg=T.HOVER if hot else T.TRACK)
+            draw_icon(self, "folder", x + T.s(18), y + T.s(21), T.s(18), T.FOLDER_INK)
             self.create_text(x + T.s(32), y + T.s(19), text=ellipsize(label, 9, "bold", tw - T.s(42)),
                              font=T.F(9, "bold"), fill=T.TEXT, anchor="w")
             home = os.path.expanduser("~")
