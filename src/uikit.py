@@ -229,6 +229,66 @@ def draw_glyph(c, kind, cx, cy, col, sz, width=None):
                       capstyle="round")
 
 
+# ------------------------------------------------------------ duotone icons
+def draw_duo(c, kind, cx, cy, sz, primary=T.ACCENT_D, secondary=None, bg=T.CARD):
+    """A Kubai-style two-tone icon: light body, brand-colour detail.
+
+    Built on the 16-unit grid from the kubai-icons duotone guide, then scaled to
+    ``sz``. Falls back to the line glyph for kinds without a duotone drawing.
+    """
+    if secondary is None:
+        secondary = mix(primary, "#FFFFFF", 0.58)
+    u = sz / 16.0
+    x0, y0 = cx - sz / 2.0, cy - sz / 2.0
+
+    def X(v):
+        return x0 + v * u
+
+    def Y(v):
+        return y0 + v * u
+
+    def box(x1, y1, x2, y2, r, **kw):
+        return rr(c, X(x1), Y(y1), X(x2), Y(y2), r * u, **kw)
+
+    if kind == "search":
+        r = 4.3
+        c.create_oval(X(6.9 - r), Y(6.9 - r), X(6.9 + r), Y(6.9 + r), fill=secondary, outline=primary,
+                      width=max(1.1, 1.7 * u))
+        c.create_line(X(10.4), Y(10.4), X(13.7), Y(13.7), fill=primary, width=max(1.6, 2.4 * u),
+                      capstyle="round")
+    elif kind == "installers":
+        c.create_line(X(8), Y(1.6), X(8), Y(6.2), fill=primary, width=max(1.5, 2.0 * u),
+                      capstyle="round")
+        c.create_polygon(X(5.3), Y(5.3), X(8), Y(8.2), X(10.7), Y(5.3), fill=primary, outline="")
+        box(2.0, 8.9, 14.0, 13.7, 1.8, fill=secondary, outline="")
+    elif kind == "blueprint":
+        box(1.6, 2.2, 14.4, 10.4, 1.8, fill=secondary, outline="")
+        box(6.1, 11.2, 9.9, 12.6, 0.6, fill=primary, outline="")
+        box(4.2, 12.9, 11.8, 14.3, 0.7, fill=primary, outline="")
+    elif kind == "settings":
+        box(1.6, 3.4, 14.4, 6.6, 1.6, fill=secondary, outline="")
+        circle(c, X(10.4), Y(5.0), 2.3 * u, fill=primary, outline="")
+        box(1.6, 9.4, 14.4, 12.6, 1.6, fill=secondary, outline="")
+        circle(c, X(5.6), Y(11.0), 2.3 * u, fill=primary, outline="")
+    elif kind == "folder":
+        box(1.6, 3.1, 6.7, 6.4, 1.4, fill=primary, outline="")
+        box(1.6, 4.7, 14.4, 13.4, 2.0, fill=secondary, outline="")
+        c.create_line(X(4.5), Y(9.1), X(9.0), Y(9.1), fill=primary, width=max(1.1, 1.3 * u),
+                      capstyle="round")
+    elif kind == "drive":
+        box(1.4, 4.2, 14.6, 11.8, 2.2, fill=secondary, outline="")
+        circle(c, X(12.2), Y(10.0), 1.0 * u, fill=primary, outline="")
+        c.create_line(X(3.6), Y(10.0), X(8.6), Y(10.0), fill=primary, width=max(1.1, 1.3 * u),
+                      capstyle="round")
+    elif kind == "wallpaper":
+        box(1.6, 2.6, 14.4, 13.4, 2.0, fill=secondary, outline="")
+        circle(c, X(11.0), Y(6.4), 1.4 * u, fill=primary, outline="")
+        c.create_polygon(X(3.2), Y(12.0), X(7.4), Y(6.6), X(11.6), Y(12.0), fill=primary,
+                         outline="")
+    else:
+        draw_glyph(c, kind, cx, cy, primary, sz, width=max(1.2, T.s(1.7)))
+
+
 def draw_file_icon(c, kind, x, y, size=38):
     """A tinted rounded tile with a simple file-type glyph."""
     fill, ink = tint_fill(kind)
@@ -565,7 +625,11 @@ class NavRail(tk.Canvas):
             t = 1 - min(1.0, abs(self.pill.value - i))
             col = mix(T.SUB, T.TEXT, t)
             cy = top + i * pitch + T.s(20)
-            draw_glyph(self, icon, T.s(35), cy, col, T.s(16), width=T.s(1.7))
+            active = t > 0.5
+            pr = T.ACCENT_D if active else T.SUB
+            sec = mix(T.ACCENT, "#FFFFFF", 0.54) if active else mix(T.SUB, "#FFFFFF", 0.68)
+            draw_duo(self, icon, T.s(35), cy, T.s(18.5), primary=pr, secondary=sec,
+                     bg=T.CARD if active else T.SIDEBAR)
             self.create_text(T.s(55), cy, text=label, font=T.F(10, "bold" if t > 0.5 else "normal"),
                              fill=col, anchor="w")
 

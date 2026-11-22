@@ -11,8 +11,8 @@ import blueprint as B
 import installers as I
 import theme as T
 from motion import Spring, clamp, mix
-from uikit import (Button, Card, Chips, IconButton, ResultsView, SearchField, Switch, circle, draw_file_icon,
-                   draw_glyph, ellipsize, line_height, measure, middle_ellipsize, photo, rr)
+from uikit import (Button, Card, Chips, IconButton, ResultsView, SearchField, Switch, circle, draw_duo,
+                   draw_file_icon, draw_glyph, ellipsize, line_height, measure, middle_ellipsize, photo, rr)
 
 
 def count(n):
@@ -202,7 +202,8 @@ class SearchIntro(Card):
                 break
             hot = i == self.hover
             rr(self, x, y, x + tw, y + th, T.s(11), fill=T.HOVER if hot else T.TRACK, outline="")
-            draw_glyph(self, "folder", x + T.s(18), y + T.s(21), T.FOLDER_INK, T.s(16), width=T.s(1.6))
+            draw_duo(self, "folder", x + T.s(18), y + T.s(21), T.s(17), primary=T.FOLDER_INK,
+                     secondary=mix(T.FOLDER_INK, "#FFFFFF", 0.7), bg=T.HOVER if hot else T.TRACK)
             self.create_text(x + T.s(32), y + T.s(19), text=ellipsize(label, 9, "bold", tw - T.s(42)),
                              font=T.F(9, "bold"), fill=T.TEXT, anchor="w")
             home = os.path.expanduser("~")
@@ -784,6 +785,9 @@ class InstallerCard(Card):
                              anchor="e")
             if i < len(self.items) - 1:
                 self.create_line(T.s(104), y + row - 1, W - T.s(24), y + row - 1, fill=T.LINE)
+        # footer band again, above the rows so a half-visible row cannot bleed through
+        self.create_rectangle(T.s(8), self.H - T.s(self.FOOT), W - T.s(8), self.H - 5, fill=T.CARD,
+                              outline="")
         # bands
         self.create_line(T.s(20), self.H - T.s(self.FOOT), W - T.s(20), self.H - T.s(self.FOOT),
                          fill=T.LINE)
@@ -1102,7 +1106,8 @@ class BlueprintCard(Card):
             bcx = bx + box_w / 2
             self.create_line(bcx, y + T.s(64), bcx, by, fill="#CBD8DC", width=T.s(1.1))
             rr(self, bx, by, bx + box_w, by + box_h, T.s(7), fill=T.CARD, outline=T.LINE)
-            draw_glyph(self, glyph, bcx, by + T.s(15), T.SUB, T.s(14), width=T.s(1.3))
+            draw_duo(self, glyph, bcx, by + T.s(16), T.s(17), primary=T.ACCENT_D,
+                     secondary=mix(T.ACCENT, "#FFFFFF", 0.6), bg=T.CARD)
             self.create_text(bcx, by + T.s(33), text=lbl, font=T.F(7, "bold"), fill=T.SUB,
                              anchor="center")
 

@@ -19,6 +19,19 @@ from uikit import NavRail, circle, draw_glyph, ellipsize, measure, photo, rr
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
+def _plate(c, x1, y1, x2, y2, r, fill):
+    """A solid rounded rectangle drawn from rectangles and discs.
+
+    Tk's smoothed-polygon fills can leave a hairline at the edge; over a stippled
+    scrim that hairline reads as ragged teeth, so dialogs use this instead.
+    """
+    r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+    c.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline="")
+    c.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline="")
+    for cx, cy in ((x1 + r, y1 + r), (x2 - r, y1 + r), (x1 + r, y2 - r), (x2 - r, y2 - r)):
+        c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill, outline="")
+
+
 # ------------------------------------------------------------------ autostart
 def autostart_enabled():
     try:
@@ -291,8 +304,9 @@ class ConfirmSheet:
             return
         c.create_rectangle(0, 0, W, H, fill="#2B2B31", stipple="gray50", outline="")
         W, H, cw, ch, x, y, pad, title_lh, body_lines, body_h = self._geometry()
-        rr(c, x + 2, y + 4, x + cw + 2, y + ch + 4, T.s(18), fill="#101014", stipple="gray25", outline="")
-        rr(c, x, y, x + cw, y + ch, T.s(18), fill=T.CARD, outline=T.LINE)
+        # Solid plate: a smoothed polygon leaves a hairline of the stippled scrim
+        # along its edge, which shows up as ragged teeth. Rects + discs never do.
+        _plate(c, x, y, x + cw, y + ch, T.s(18), T.CARD)
         c.create_text(x + pad, y + pad, text=self.title, font=T.F(16, "bold"), fill=T.TEXT, anchor="nw",
                       width=cw - pad * 2)
         by = y + pad + title_lh + T.s(10)
