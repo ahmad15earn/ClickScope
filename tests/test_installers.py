@@ -48,7 +48,7 @@ def test_normalize_name():
     a = I.normalize_name("PhotoStudio_2024.1_win64.exe")
     b = I.normalize_name("PhotoStudio_2023.2_win64.exe")
     assert a == b == "photostudio", (a, b)
-    assert I.normalize_name("App Setup v1.3.exe") == I.normalize_name("App Setup v1.2.exe") == "app setup"
+    assert I.normalize_name("App Setup v1.3.exe") == I.normalize_name("App Setup v1.2.exe") == "app"
 
 
 def test_find_duplicates_and_safe_picks():

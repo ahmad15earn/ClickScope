@@ -1,6 +1,6 @@
 ; Inno Setup script: a normal Windows installer that lets the user choose the install folder.
 #define MyAppName "ClickScope"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
 
 [Setup]
 AppId={{B3C2A7E4-5D61-4F0B-9C1E-7A2D3E5F8A10}

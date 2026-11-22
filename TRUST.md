@@ -1,31 +1,38 @@
 # Don't trust us. Verify.
 
-ClickScope watches which apps you click so it can find the software you rely on. That is sensitive, so the
-promise is simple and **checkable**:
+ClickScope is a local utility. It has no account, no cloud, no telemetry and no click tracking.
+The promise is simple and checkable:
 
-**Your click data never leaves your PC.**
+**Nothing about your PC leaves your PC.**
 
-## What the tracker does
-- Counts mouse clicks and notes which program was clicked (and, for browsers, a site name from the tab title).
-- Stores only daily totals per app / site / hour in a local SQLite file: `%APPDATA%\ClickScope\clickscope.db`.
-- Never records keystrokes, screenshots, cursor paths, page content or full URLs.
+## What ClickScope stores
 
-## What can leave your PC (only if you sign in)
-Your **recovery list** only: installed-app names, apps and sites you chose to keep, and your recovery selection.
-Never click counts. The code that does this is the single file `src/cloud.py`.
+All data is in `%APPDATA%\ClickScope\` (or `%CLICKSCOPE_HOME%` if you set it):
 
-## Verify it yourself (2 minutes)
-The tracking engine is two files and neither contains any network code:
+- **Search index** — file names, folder paths, sizes, dates and file kinds. Never file contents.
+- **Blueprints** — folder names and, if you include it, a copy of your current wallpaper picture.
+- **Settings** — a few choices such as installer age and start-with-Windows.
 
-| File | Job |
-|------|-----|
-| `src/winhook.py` | Windows mouse hook, finds which window was clicked |
-| `src/core.py`    | Local storage and analysis |
+## What ClickScope never does
 
-1. Open them and search for `socket`, `urllib`, `http`, `requests`, `smtplib`: you will find none.
-2. Run `python tests/test_no_network.py`. It reads the source and **fails if either file ever imports a network
-   module**, so a future change cannot quietly add one.
-3. Watch it live: Windows Firewall or Resource Monitor > Network shows ClickScope silent unless you press
-   *Sign in* or *Sync now*.
+- No network requests, background uploads or crash reporting.
+- No keystrokes, screenshots, cursor paths or browser history.
+- No permanent deletion: old installers are moved to the Recycle Bin, and only after you confirm.
+- No document copying in a blueprint: restore creates empty folders only.
 
-The whole project is MIT licensed (see `LICENSE`): read it, audit it, build it yourself.
+## Verify it yourself
+
+1. Search the source for `socket`, `ssl`, `urllib`, `http`, `requests`, `httpx`, `aiohttp`, `smtplib`
+   or `webbrowser` — the app modules contain none.
+2. Run:
+
+   ```bat
+   python tests\test_no_network.py
+   ```
+
+   It parses the app's modules and fails if a network import is ever added.
+
+3. Run `python src\main.py --demo`, or watch Resource Monitor → Network. ClickScope stays silent.
+
+The app is plain Python and Tkinter. Build it yourself with `build.bat` and read every line.
+MIT licensed — see `LICENSE`.

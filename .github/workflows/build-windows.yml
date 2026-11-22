@@ -12,6 +12,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install pyinstaller
+      - name: Run local engine tests
+        run: |
+          python tests/test_filesearch.py
+          python tests/test_installers.py
+          python tests/test_blueprint.py
+          python tests/test_no_network.py
       - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name ClickScope --icon assets/app.ico --add-data "assets;assets" --paths src src/main.py
       - name: Build installer (folder-choosing setup wizard)
         shell: pwsh

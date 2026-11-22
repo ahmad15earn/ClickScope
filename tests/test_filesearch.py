@@ -12,7 +12,7 @@ from filesearch import FileIndex
 
 
 def make_tree():
-    base = tempfile.mkdtemp(prefix="clickscope-fs-")
+    base = tempfile.mkdtemp(prefix="clickscope-fs-", dir=os.path.dirname(HERE))
     reports = os.path.join(base, "Documents", "Reports")
     pictures = os.path.join(base, "Pictures")
     downloads = os.path.join(base, "Downloads")

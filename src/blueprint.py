@@ -10,7 +10,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import zipfile
 
@@ -292,7 +291,7 @@ def capture(progress_cb=None, include_wallpaper=True, stop_event=None, extra_roo
     now = datetime.datetime.now()
     data = dict(format=DNA_FORMAT, version=DNA_VERSION,
                 created=now.strftime("%d %b %Y, %H:%M"), created_ts=int(now.timestamp()),
-                pc=os.environ.get("COMPUTERNAME") or socket.gethostname(),
+                pc=os.environ.get("COMPUTERNAME") or "This PC",
                 user=os.environ.get("USERNAME") or os.path.basename(os.path.expanduser("~")),
                 home=os.path.expanduser("~"), drives=drive_info(), folders=folders,
                 folder_count=len(folders), wallpaper=None)
@@ -319,7 +318,7 @@ def save_wallpaper_copy():
     data = dict(format=DNA_FORMAT, version=DNA_VERSION, kind="wallpaper",
                 created=datetime.datetime.now().strftime("%d %b %Y, %H:%M"),
                 created_ts=int(datetime.datetime.now().timestamp()),
-                pc=os.environ.get("COMPUTERNAME") or socket.gethostname(),
+                pc=os.environ.get("COMPUTERNAME") or "This PC",
                 user=os.environ.get("USERNAME") or "", home=os.path.expanduser("~"),
                 drives=drive_info(), folders=[], folder_count=0, wallpaper=info)
     with open(os.path.join(folder, "blueprint.json"), "w", encoding="utf-8") as f:
