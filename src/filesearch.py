@@ -18,7 +18,7 @@ import threading
 import time
 from ctypes import wintypes
 
-from appdata import APP_DIR, INDEX_PATH, IS_WINDOWS, fixed_drives, known_folders
+from appdata import APP_DIR, INDEX_PATH, IS_WINDOWS, fixed_drives, known_folders, local_drives
 
 # ------------------------------------------------------------------ file kinds
 EXT_KINDS = {
@@ -91,7 +91,9 @@ class FileIndex:
         self.path = path or INDEX_PATH
         self.extra_roots = [p for p in (extra_roots or []) if p]
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=8)
+        self.recovered = False
+        self.corrupt_backup = ""
+        self.db = self._open_db()
         self.db.row_factory = sqlite3.Row
         try:
             self.db.execute("PRAGMA journal_mode=WAL")
@@ -100,7 +102,11 @@ class FileIndex:
             self.db.execute("PRAGMA cache_size=-12000")
         except sqlite3.DatabaseError:
             pass
-        self._make_schema()
+        try:
+            self._make_schema()
+        except sqlite3.DatabaseError:
+            self._recover_db()
+            self._make_schema()
         self._stats_cache = (0.0, None)
         self._stop = None
         self._thread = None
@@ -114,6 +120,51 @@ class FileIndex:
         self._watch_worker = None
         self.on_change = None
         self._load_state()
+
+    # -------------------------------------------------------------- recovery
+    def _open_db(self):
+        """Open the index, refusing a file SQLite itself reports as damaged."""
+        db = sqlite3.connect(self.path, check_same_thread=False, timeout=8)
+        try:
+            row = db.execute("PRAGMA quick_check").fetchone()
+            if not row or str(row[0]).lower() != "ok":
+                raise sqlite3.DatabaseError("index failed quick_check")
+        except sqlite3.DatabaseError:
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+            self._recover_db()
+            try:
+                self.db.close()
+            except (AttributeError, sqlite3.Error):
+                pass
+            db = sqlite3.connect(self.path, check_same_thread=False, timeout=8)
+        return db
+
+    def _recover_db(self):
+        """Move a damaged index aside and start clean. The old file is kept."""
+        try:
+            with self.lock:
+                self.db.close()
+        except (AttributeError, sqlite3.Error):
+            pass
+        stamp = int(time.time())
+        self.corrupt_backup = f"{self.path}.corrupt-{stamp}"
+        for src, dst in ((self.path, self.corrupt_backup),
+                         (self.path + "-wal", self.corrupt_backup + "-wal"),
+                         (self.path + "-shm", self.corrupt_backup + "-shm")):
+            try:
+                if os.path.exists(src):
+                    os.replace(src, dst)
+            except OSError:
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+        self.recovered = True
+        self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=8)
+        self.db.row_factory = sqlite3.Row
 
     # ------------------------------------------------------------------ schema
     def _make_schema(self):
@@ -195,7 +246,42 @@ class FileIndex:
 
     # ------------------------------------------------------------------ stats
     def default_roots(self):
-        return list(dict.fromkeys(fixed_drives() + list(self.extra_roots)))
+        """Every local disk, including a connected USB drive, plus added folders."""
+        return list(dict.fromkeys(local_drives() + list(self.extra_roots)))
+
+    def _known_roots(self):
+        raw = self._meta("known_roots")
+        if raw:
+            try:
+                roots = json.loads(raw)
+                if isinstance(roots, list):
+                    return [r for r in roots if isinstance(r, str) and r]
+            except ValueError:
+                pass
+        return list(json.loads(self._meta("roots") or "[]"))
+
+    def sync_roots(self):
+        """Detect unplugged/reconnected drives. Rows for missing roots are pruned.
+
+        Returns {"missing": [...], "added": [...], "present": [...]}; `added` are
+        drives that were offline last time and are available again, so the caller
+        can index just those without a full rescan.
+        """
+        known = list(dict.fromkeys(self._known_roots()))
+        try:
+            previous_offline = set(json.loads(self._meta("offline_roots") or "[]"))
+        except ValueError:
+            previous_offline = set()
+        present, missing = [], []
+        for root in known:
+            (present if os.path.isdir(root) else missing).append(root)
+        for root in missing:
+            self._delete_prefix(root)
+        added = [r for r in present if r in previous_offline]
+        self._set_meta("offline_roots", json.dumps(missing))
+        if missing or added:
+            self._invalidate()
+        return dict(missing=missing, added=added, present=present)
 
     def stats(self, cache=True):
         now = time.time()
@@ -211,6 +297,8 @@ class FileIndex:
         data = dict(total=int(total), dirs=int(dirs), files=int(installed), state=st,
                     last_build=float(self._meta("last_build") or 0),
                     roots=json.loads(self._meta("roots") or "[]"),
+                    offline_roots=json.loads(self._meta("offline_roots") or "[]"),
+                    recovered=bool(self.recovered),
                     progress=dict(self._progress))
         self._stats_cache = (now, data)
         return dict(data)
@@ -256,12 +344,16 @@ class FileIndex:
             pass
 
     def build(self, roots=None, reset=True, stop_event=None, progress_cb=None):
-        """Synchronous full scan. roots defaults to every fixed local drive."""
+        """Synchronous full scan. roots defaults to every local drive."""
         self._invalidate()
-        roots = [r for r in (roots or self.default_roots()) if os.path.isdir(r)]
+        requested = [r for r in (roots or self.default_roots()) if r]
+        roots = [os.path.abspath(r) for r in requested if os.path.isdir(r)]
         stop = stop_event or threading.Event()
         if reset:
             self._reset_index()
+        self._set_meta("known_roots", json.dumps(list(dict.fromkeys(os.path.abspath(r) for r in requested))))
+        self._set_meta("offline_roots", json.dumps([os.path.abspath(r) for r in requested
+                                                    if not os.path.isdir(r)]))
         with self.lock:
             self._progress.update(state="scanning", files=0, dirs=0, current="", started=time.time(),
                                   done=0.0, error="", total_estimate=0)
@@ -345,6 +437,8 @@ class FileIndex:
                     progress(d)
                 else:
                     progress(d)
+                if counters["dirs"] and counters["dirs"] % 400 == 0:
+                    time.sleep(0.003)  # let the UI and the disk breathe
         flush()
         cancelled = stop.is_set()
         state = "partial" if cancelled else "ready"
@@ -367,6 +461,8 @@ class FileIndex:
         self._set_meta("state", "idle")
         self._set_meta("last_build", 0)
         self._set_meta("roots", "[]")
+        self._set_meta("known_roots", "[]")
+        self._set_meta("offline_roots", "[]")
         with self.lock:
             self._progress.update(state="idle", files=0, dirs=0, current="", started=0.0, done=0.0,
                                   total_estimate=0, error="")
@@ -486,11 +582,52 @@ class FileIndex:
     def _rows_to_dicts(self, rows):
         return [dict(r) for r in rows]
 
-    def search(self, query, kind=None, limit=120):
+    @staticmethod
+    def _inside(path, folder):
+        try:
+            p = os.path.normcase(os.path.abspath(path))
+            f = os.path.normcase(os.path.abspath(os.path.expanduser(folder)))
+        except (OSError, ValueError):
+            return False
+        return p == f or p.startswith(f.rstrip("\\/") + os.sep)
+
+    @staticmethod
+    def _passes(row, scope=None, min_size=None, max_size=None, min_mtime=None, max_mtime=None):
+        if scope and not FileIndex._inside(row.get("path") or "", scope):
+            return False
+        is_dir = bool(row.get("is_dir"))
+        if is_dir and (min_size is not None or max_size is not None):
+            return False
+        size = int(row.get("size") or 0)
+        if not is_dir:
+            if min_size is not None and size < int(min_size):
+                return False
+            if max_size is not None and size > int(max_size):
+                return False
+        mtime = int(row.get("mtime") or 0)
+        if min_mtime is not None and mtime < int(min_mtime):
+            return False
+        if max_mtime is not None and mtime > int(max_mtime):
+            return False
+        return True
+
+    def find_by_name(self, name, limit=40):
+        """Exact name lookup used to re-match a protected file after a move."""
+        if not name:
+            return []
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT path,name,dir,ext,size,mtime,kind,is_dir FROM files WHERE name_lower=? "
+                "ORDER BY is_dir DESC, mtime DESC LIMIT ?", ((name or "").lower(), int(limit))).fetchall()
+        return self._rows_to_dicts(rows)
+
+    def search(self, query, kind=None, limit=120, scope=None, min_size=None, max_size=None,
+               min_mtime=None, max_mtime=None):
         q = (query or "").strip()
-        if not q:
+        if not q and not scope:
             return []
         kind = kind if kind and kind != "all" else None
+        filtered = any(v is not None for v in (scope, min_size, max_size, min_mtime, max_mtime))
         ql = q.lower()
         results, seen = [], set()
 
@@ -504,7 +641,7 @@ class FileIndex:
                 sql += " AND f.kind = ?"
                 args.append(kind)
             sql += " ORDER BY bm25(files_fts, 8.0, 1.5) LIMIT ?"
-            args.append(max(limit, 60))
+            args.append(max(limit * 5, 300) if filtered else max(limit, 60))
             try:
                 with self.lock:
                     rows = self.db.execute(sql, args).fetchall()
@@ -515,7 +652,7 @@ class FileIndex:
                 pass
 
         # 2) Substring search: catches "port" inside "report" and non-ASCII names.
-        need_more = len(results) < min(limit, 40) or not fts_q or not q.isascii()
+        need_more = filtered or len(results) < min(limit, 40) or not fts_q or not q.isascii() or not q
         if need_more:
             tokens = [t for t in re.split(r"\s+", ql) if t]
             clauses, args = [], []
@@ -528,7 +665,8 @@ class FileIndex:
             if kind:
                 sql += " AND kind = ?"
                 args.append(kind)
-            sql += " LIMIT 1500"
+            sql += " LIMIT ?"
+            args.append(8000 if filtered else 1500)
             try:
                 with self.lock:
                     rows = self.db.execute(sql, args).fetchall()
@@ -538,6 +676,10 @@ class FileIndex:
                         seen.add(r["path"])
             except sqlite3.DatabaseError:
                 pass
+
+        if filtered:
+            results = [r for r in results if self._passes(r, scope, min_size, max_size,
+                                                          min_mtime, max_mtime)]
 
         def score(r):
             name = (r["name"] or "").lower()
@@ -555,7 +697,7 @@ class FileIndex:
                 return 3
             if tokens and all(t in d for t in tokens):
                 return 4
-            return 5
+            return 5 if ql else 0
 
         results.sort(key=lambda r: (score(r), 0 if r["is_dir"] else 1, -(r["mtime"] or 0), r["name"].lower()))
         return results[:limit]

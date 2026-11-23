@@ -90,9 +90,9 @@ python tests\test_no_network.py
 The UI is Tkinter with a small custom canvas component library (`src/uikit.py`), a warm light theme
 (`src/theme.py`) and springs from `src/motion.py`. The four features live in `src/pages.py` and
 `src/ui.py`; their engines are `src/filesearch.py`, `src/installers.py` and `src/blueprint.py`.
-Icons are drawn in code, not loaded from an icon font or image files: navigation uses two-tone
-icons (a light body plus one accent detail) following the [Kubai Icons](https://github.com/kubai087/kubai-icons)
-duotone guide, and everything else uses the same 16-unit grid as thin line glyphs.
+Icons are a bundled pack in `assets/icons/` (bold 24px line icons), tinted and cached at
+draw time by `src/uikit.py`; without Pillow the app falls back to the drawn glyphs, so the
+build scripts install Pillow with PyInstaller.
 Old click-tracking modules may remain in the folder for reference but are not imported by the app.
 
 MIT licensed. See [LICENSE](LICENSE).

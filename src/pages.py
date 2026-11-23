@@ -1,4 +1,4 @@
-﻿"""The four everyday pages: Search, Installers, Blueprint and Settings."""
+"""The four everyday pages: Search, Installers, Blueprint and Settings."""
 import math
 import os
 import threading
@@ -9,11 +9,52 @@ from tkinter import filedialog
 import appdata as A
 import blueprint as B
 import installers as I
+import notifications as N
+import protection as P
 import theme as T
-from motion import Spring, clamp, mix
-from uikit import (Button, Card, Chips, IconButton, ResultsView, SearchField, Switch, circle,
-                   draw_file_icon, draw_glyph, draw_icon, ellipsize, line_height, measure,
+import websites as W
+from motion import Spring, clamp
+from uikit import (Button, Card, ChipButton, Chips, IconButton, ResultsView, SearchField, Switch,
+                   circle, draw_file_icon, draw_glyph, draw_icon, ellipsize, line_height, measure,
                    middle_ellipsize, photo, rr)
+
+MB = 1024 * 1024
+GB = 1024 * MB
+SIZE_FILTERS = [
+    ("any", "Any size", None, None),
+    ("small", "Under 10 MB", 0, 10 * MB),
+    ("medium", "10\u2013100 MB", 10 * MB, 100 * MB),
+    ("large", "100 MB\u20131 GB", 100 * MB, GB),
+    ("huge", "Over 1 GB", GB, None),
+]
+DATE_FILTERS = [
+    ("any", "Any time", None, None),
+    ("today", "Today", "today", None),
+    ("week", "Last 7 days", 7, None),
+    ("month", "Last 30 days", 30, None),
+    ("year", "This year", "year", None),
+    ("old", "Older than a year", None, 365),
+]
+LEGEND = [("ZIP", T.ARCHIVE_INK), ("PDF", T.PDF_INK), ("Image", T.IMAGE_INK),
+          ("Video", T.VIDEO_INK), ("Audio", T.AUDIO_INK), ("App", T.APP_INK)]
+
+
+def _date_bounds(key):
+    """Turn a date filter key into (min_mtime, max_mtime) epoch seconds."""
+    now = time.time()
+    if key == "today":
+        start = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+        return int(start), None
+    if key == "week":
+        return int(now - 7 * 86400), None
+    if key == "month":
+        return int(now - 30 * 86400), None
+    if key == "year":
+        start = time.mktime((time.localtime().tm_year, 1, 1, 0, 0, 0, 0, 0, -1))
+        return int(start), None
+    if key == "old":
+        return None, int(now - 365 * 86400)
+    return None, None
 
 
 def count(n):
@@ -50,6 +91,9 @@ class Page(tk.Frame):
         self.head_right.pack(side="right", anchor="n", pady=(T.s(5), 0))
 
     def on_show(self):
+        pass
+
+    def on_hide(self):
         pass
 
 
@@ -218,7 +262,7 @@ class SearchIntro(Card):
         cx = W / 2
         cy = max(T.s(62), H * 0.27)
         circle(self, cx, cy, T.s(28), fill=T.ACCENT_SOFT, outline="")
-        draw_glyph(self, "search", cx, cy, T.ACCENT_D, T.s(23), width=T.s(2))
+        draw_icon(self, "search", cx, cy, T.s(26), T.ACCENT_D)
         self.text(cx, cy + T.s(46), "Make this PC searchable", 20, "bold", fill=T.TEXT, anchor="center")
         body = ("One quiet pass over your drives builds a local index. After that,\n"
                 "every file appears the moment you start typing.")
@@ -286,6 +330,24 @@ class SearchPage(Page):
             self.kind = "all"
         self.chips.selected = self.kind
         self.chips.pack(fill="x")
+
+        # Second row: where, how big, how old, and a quiet colour legend.
+        fbar = tk.Frame(self, bg=T.BG)
+        fbar.pack(fill="x", padx=(T.s(40), T.s(36)), pady=(T.s(7), 0))
+        self.scope_key = app.state.get("search_scope", "any") or "any"
+        self.size_key = app.state.get("search_size", "any") or "any"
+        self.date_key = app.state.get("search_date", "any") or "any"
+        self.scope_chip = ChipButton(fbar, app.motion, self._scope_label(), self._scope_menu,
+                                     bg=T.BG, active=self.scope_key != "any", h=T.s(28))
+        self.size_chip = ChipButton(fbar, app.motion, self._size_label(), self._size_menu,
+                                    bg=T.BG, active=self.size_key != "any", h=T.s(28))
+        self.date_chip = ChipButton(fbar, app.motion, self._date_label(), self._date_menu,
+                                    bg=T.BG, active=self.date_key != "any", h=T.s(28))
+        for chip in (self.scope_chip, self.size_chip, self.date_chip):
+            chip.pack(side="left", padx=(0, T.s(6)))
+        self.legend = tk.Canvas(fbar, height=T.s(28), bg=T.BG, highlightthickness=0, bd=0)
+        self.legend.pack(side="right", fill="x", expand=True)
+        self.legend.bind("<Configure>", lambda e: self._draw_legend())
 
         self.body = tk.Frame(self, bg=T.BG)
         self.body.pack(fill="both", expand=True, padx=(T.s(40), T.s(36)), pady=(T.s(14), T.s(26)))
@@ -386,6 +448,7 @@ class SearchPage(Page):
             self.app.index.build_async(on_done=lambda ok, st: self.app.post(lambda: self._built(st, ok)))
         except Exception as e:
             self.app.toast(f"Could not start indexing: {e}", "error")
+            self.app.notify("errors", "Indexing could not start", str(e), "search")
             self._building = False
             return
         self.intro.enter()
@@ -405,8 +468,12 @@ class SearchPage(Page):
         self.app.refresh_status()
         if stats and stats.get("files", 0):
             self.app.toast(f"Index ready \u2014 {count(stats['files'])} files searchable.", "good")
+            self.app.notify("index", "Index ready",
+                            f"{count(stats['files'])} files are searchable on this PC.", "search")
         elif not ok:
             self.app.toast("Indexing stopped early. Search still works with what was found.", "warn")
+            self.app.notify("errors", "Indexing stopped early",
+                            "Search still works with the files that were found.", "search")
         if self._query.strip():
             self._search_now(self._query)
 
@@ -435,6 +502,89 @@ class SearchPage(Page):
         if self._query.strip():
             self._search_now(self._query)
 
+    # ---------------------------------------------------------------- filters
+    def _scope_label(self):
+        return "Anywhere" if self.scope_key == "any" else self.scope_key
+
+    def _size_label(self):
+        return next((label for key, label, _, _ in SIZE_FILTERS if key == self.size_key), "Any size")
+
+    def _date_label(self):
+        return next((label for key, label, _, _ in DATE_FILTERS if key == self.date_key), "Any time")
+
+    def _filter_args(self):
+        min_size = max_size = min_mtime = max_mtime = None
+        for key, _, lo, hi in SIZE_FILTERS:
+            if key == self.size_key:
+                min_size, max_size = lo, hi
+                break
+        for key, _, lo, hi in DATE_FILTERS:
+            if key == self.date_key:
+                min_mtime, max_mtime = _date_bounds(key)
+                break
+        return dict(scope=None if self.scope_key == "any" else self.scope_key,
+                    min_size=min_size, max_size=max_size,
+                    min_mtime=min_mtime, max_mtime=max_mtime)
+
+    def _popup(self, options, current, apply):
+        m = tk.Menu(self, tearoff=0, bg=T.CARD, fg=T.TEXT, activebackground=T.ACCENT_SOFT,
+                    activeforeground=T.TEXT, font=T.F(9), bd=0)
+        var = tk.StringVar(value=current)
+        for key, label in options:
+            m.add_radiobutton(label=label, value=key, variable=var,
+                              command=lambda k=key: apply(k))
+        try:
+            m.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            m.grab_release()
+
+    def _scope_menu(self):
+        drives = A.local_drives()
+        options = [("any", "Anywhere")] + [(d, f"Drive {d[:2]}") for d in drives]
+        self._popup(options, self.scope_key, self._set_scope)
+
+    def _size_menu(self):
+        self._popup([(k, label) for k, label, _, _ in SIZE_FILTERS], self.size_key, self._set_size)
+
+    def _date_menu(self):
+        self._popup([(k, label) for k, label, _, _ in DATE_FILTERS], self.date_key, self._set_date)
+
+    def _set_scope(self, key):
+        self.scope_key = key
+        self.app.state.set("search_scope", key)
+        self.scope_chip.set_text("Anywhere" if key == "any" else key, active=key != "any")
+        self._refilter()
+
+    def _set_size(self, key):
+        self.size_key = key
+        self.app.state.set("search_size", key)
+        self.size_chip.set_text(self._size_label(), active=key != "any")
+        self._refilter()
+
+    def _set_date(self, key):
+        self.date_key = key
+        self.app.state.set("search_date", key)
+        self.date_chip.set_text(self._date_label(), active=key != "any")
+        self._refilter()
+
+    def _refilter(self):
+        if self._query.strip():
+            self._search_now(self._query)
+
+    def _draw_legend(self):
+        c = self.legend
+        c.delete("all")
+        W = c.winfo_width()
+        if W < 40:
+            return
+        x = W
+        for label, col in reversed(LEGEND):
+            w = measure(label, 7, "bold")
+            x -= w + T.s(14)
+            c.create_text(x + T.s(14), T.s(14), text=label, font=T.F(7, "bold"), fill=T.SUB, anchor="e")
+            circle(c, x + T.s(5), T.s(14), T.s(3.2), fill=col, outline="")
+            x -= T.s(8)
+
     def _search_now(self, query):
         q = query.strip()
         if not q:
@@ -442,9 +592,10 @@ class SearchPage(Page):
         self._generation += 1
         gen = self._generation
         kind = self.kind
+        args = self._filter_args()
         if self._intro_visible:
             self.results.set_results([], q)
-        self.app.jobs.run(lambda: self.app.index.search(q, kind, limit=140),
+        self.app.jobs.run(lambda: self.app.index.search(q, kind, limit=140, **args),
                           on_done=lambda rows: self._results(gen, q, rows))
 
     def _results(self, gen, query, rows):
@@ -453,6 +604,10 @@ class SearchPage(Page):
         for r in rows:
             r["size_text"] = A.human_size(r.get("size"))
             r["age_text"] = A.human_age(r.get("mtime"))
+            try:
+                r["protected"] = bool(self.app.protection.is_protected(r.get("path") or ""))
+            except Exception:
+                r["protected"] = False
         self._choose_view()
         self.results.set_results(rows, query)
 
@@ -486,10 +641,55 @@ class SearchPage(Page):
         m.add_command(label="Show in folder", command=lambda: self._reveal(result))
         m.add_separator()
         m.add_command(label="Copy full path", command=lambda: self._copy(result.get("path", "")))
+        m.add_separator()
+        path = result.get("path") or ""
+        entry = None
+        try:
+            entry = self.app.protection.protected_entry_for(path)
+        except Exception:
+            entry = None
+        if entry and os.path.normcase(entry.get("path", "")) == os.path.normcase(path):
+            m.add_command(label="Remove protection", command=lambda: self._unprotect(result))
+        elif entry:
+            m.add_command(label="Protected by a protected folder", state="disabled")
+        else:
+            m.add_command(label="Protect this item", command=lambda: self._protect(result))
         try:
             m.tk_popup(event.x_root, event.y_root)
         finally:
             m.grab_release()
+
+    def _protect(self, result):
+        path = result.get("path") or ""
+        try:
+            entry = self.app.protection.add(path)
+        except Exception as e:
+            self.app.toast(str(e) or "Could not protect that item.", "error")
+            return
+        self.app.toast(f"\u201c{entry['name']}\u201d is protected. Cleanup will skip it.", "good")
+        self.app.notify("protection", "Item protected",
+                        f"{entry['name']} can no longer be suggested for cleanup.", "protection")
+        self.app.protection_page.refresh()
+        self._refilter()
+
+    def _unprotect(self, result):
+        path = result.get("path") or ""
+        entry = self.app.protection.get(path)
+        if not entry:
+            return
+        self.app.confirm(
+            "Remove this protection?",
+            f"\u201c{entry['name']}\u201d will become eligible for cleanup suggestions again. The file "
+            "itself is not touched either way.",
+            confirm="Remove protection",
+            on_confirm=lambda: self._unprotect_now(entry))
+
+    def _unprotect_now(self, entry):
+        self.app.protection.remove(entry["path"])
+        self.app.toast("Protection removed.", "good")
+        self.app.protection_page.refresh()
+        self._refilter()
+
 
     def _copy(self, text):
         if A.copy_text(text):
@@ -509,14 +709,16 @@ class InstallerCard(Card):
     ROW = 64
     FOOT = 62
 
-    def __init__(self, parent, motion, on_delete, on_ignore, on_reveal, on_copy):
+    def __init__(self, parent, motion, on_delete, on_ignore, on_reveal, on_copy, on_protect=None):
         super().__init__(parent, motion, bg=T.BG, radius=18)
         self.items, self.selected = [], set()
         self.busy, self.used_index, self.age, self.error = False, True, 30, ""
+        self.stats = {}
         self.hover = -1
         self.spin = 0.0
         self._anim = None
         self.on_delete, self.on_ignore, self.on_reveal, self.on_copy = on_delete, on_ignore, on_reveal, on_copy
+        self.on_protect = on_protect
         self.scroll = Spring(motion, self, 0.0, response=0.22, eps=0.4)
         self.reveal.jump(1.0)
         self.pick_btn = Button(self, motion, "Select safe picks", self._safe_picks, style="quiet",
@@ -537,12 +739,14 @@ class InstallerCard(Card):
     def set_loading(self, age, used_index=True):
         self.age, self.used_index = age, used_index
         self.items, self.selected, self.busy, self.error = [], set(), True, ""
+        self.stats = {}
         self.scroll.jump(0)
         self._start_spin()
         self.redraw()
 
-    def set_items(self, items, age, used_index=True, error=""):
+    def set_items(self, items, age, used_index=True, error="", stats=None):
         self.age, self.used_index, self.error = age, used_index, error or ""
+        self.stats = dict(stats or {})
         self.items = list(items)
         keep = {i["path"] for i in self.items}
         self.selected &= keep
@@ -674,6 +878,8 @@ class InstallerCard(Card):
                     activeforeground=T.TEXT, font=T.F(9), bd=0)
         m.add_command(label="Show in folder", command=lambda: self._reveal(it))
         m.add_command(label="Copy full path", command=lambda: self.on_copy(it["path"]))
+        if self.on_protect:
+            m.add_command(label="Protect this installer", command=lambda: self.on_protect(it))
         m.add_separator()
         m.add_command(label="Hide from this list", command=lambda: self.on_ignore(it["path"]))
         try:
@@ -715,12 +921,20 @@ class InstallerCard(Card):
         self.text(pad, T.s(28), A.human_size(total), 25, "bold", fill=T.TEXT)
         n = len(self.items)
         dups = sum(1 for i in self.items if i.get("duplicate_of"))
+        large = sum(1 for i in self.items if i.get("large_old"))
         bits = [f"{n} old installer{'s' if n != 1 else ''}"]
         if dups:
             bits.append(f"{dups} duplicate version{'s' if dups != 1 else ''}")
+        if large:
+            bits.append(f"{large} large & old")
         bits.append(f"older than {self.age} days")
         self.create_text(pad, T.s(72), text="  \u00b7  ".join(bits), font=T.F(9), fill=T.SUB, anchor="w")
-        if not self.used_index:
+        skipped = int(self.stats.get("protected_skipped") or 0)
+        if skipped:
+            self.create_text(pad, T.s(92),
+                             text=f"{skipped} protected item{'s' if skipped != 1 else ''} kept out of this list.",
+                             font=T.F(8), fill=T.GREEN, anchor="w")
+        elif not self.used_index:
             self.create_text(pad, T.s(92), text="Quick scan of everyday folders \u2014 build the search index for a complete list.",
                              font=T.F(8), fill=T.AMBER, anchor="w")
         self.create_line(T.s(20), T.s(self.HEAD), W - T.s(20), T.s(self.HEAD), fill=T.LINE)
@@ -752,7 +966,7 @@ class InstallerCard(Card):
             bx = T.s(25)
             if chosen:
                 rr(self, bx, cy - T.s(9), bx + T.s(18), cy + T.s(9), T.s(5), fill=T.INK, outline="")
-                draw_glyph(self, "check", bx + T.s(9), cy, "#FFFFFF", T.s(11), width=T.s(1.8))
+                draw_glyph(self, "check", bx + T.s(9), cy, "#FFFFFF", T.s(11), width=T.s(2.1))
             else:
                 rr(self, bx, cy - T.s(9), bx + T.s(18), cy + T.s(9), T.s(5), fill=T.CARD,
                    outline=T.LINE2 if i != self.hover else T.SUB)
@@ -821,14 +1035,14 @@ class InstallerCard(Card):
         cx, cy = self.W / 2, self.H * 0.40
         if self.error:
             circle(self, cx, cy, T.s(27), fill=T.RED_SOFT, outline="")
-            draw_glyph(self, "warning", cx, cy, T.RED, T.s(22), width=T.s(1.8))
+            draw_glyph(self, "warning", cx, cy, T.RED, T.s(24), width=T.s(2.0))
             self.create_text(cx, cy + T.s(44), text="Could not finish the scan", font=T.F(13, "bold"),
                              fill=T.TEXT, anchor="center")
             self.create_text(cx, cy + T.s(66), text=self.error, font=T.F(9), fill=T.SUB, anchor="center",
                              width=min(T.s(500), self.W - T.s(80)))
             return
         circle(self, cx, cy, T.s(27), fill=T.GREEN_SOFT, outline="")
-        draw_glyph(self, "check", cx, cy, T.GREEN, T.s(23), width=T.s(2))
+        draw_glyph(self, "check", cx, cy, T.GREEN, T.s(25), width=T.s(2.2))
         self.create_text(cx, cy + T.s(44), text="Nothing old is sitting around", font=T.F(13, "bold"),
                          fill=T.TEXT, anchor="center")
         self.create_text(cx, cy + T.s(66),
@@ -859,14 +1073,19 @@ class InstallersPage(Page):
         self.hidden_btn = Button(bar, app.motion, "", self._show_hidden, style="quiet", bg=T.BG,
                                  h=T.s(30), size=9)
         self._update_hidden()
+        self.large_only = bool(app.state.get("installer_large_only", False))
+        self.large_btn = Button(bar, app.motion, self._large_label(), self._toggle_large, style="quiet",
+                                bg=T.BG, h=T.s(30), size=9)
+        self.large_btn.pack(side="right", padx=(T.s(6), 0))
 
         self.body = tk.Frame(self, bg=T.BG)
         self.body.pack(fill="both", expand=True, padx=(T.s(40), T.s(36)), pady=(T.s(13), T.s(26)))
         self.card = InstallerCard(self.body, app.motion, self._ask_delete, self._ignore, self._reveal,
-                                  self._copy)
+                                  self._copy, self._protect)
         self.card.place(x=0, y=0, relwidth=1, relheight=1)
         self.loaded = False
         self._scan_id = 0
+        self._last_notice = None
         self._closed = False
 
     def on_show(self):
@@ -890,6 +1109,15 @@ class InstallersPage(Page):
         else:
             self.hidden_btn.pack_forget()
 
+    def _large_label(self):
+        return "Large & old only" if not self.large_only else "Showing large & old"
+
+    def _toggle_large(self):
+        self.large_only = not self.large_only
+        self.app.state.set("installer_large_only", self.large_only)
+        self.large_btn.set_text(self._large_label())
+        self._scan()
+
     def _age_changed(self, age):
         self.age = int(age)
         self.app.state.set("installer_age", self.age)
@@ -907,24 +1135,62 @@ class InstallersPage(Page):
             used_index = False
         self.card.set_loading(self.age, used_index)
         age = self.age
+        stats = {}
 
         def work():
-            return I.find_installers(index=self.app.index, min_age_days=age)
+            return I.find_installers(index=self.app.index, min_age_days=age,
+                                     protection=self.app.protection, stats=stats)
 
         def done(items):
             if self._closed or token != self._scan_id:
                 return
             ignored = self.app.state.ignored_installers()
             items = [i for i in items if i["path"].lower() not in ignored]
-            self.card.set_items(items, age, used_index)
+            if self.large_only:
+                items = [i for i in items if i.get("large_old")]
+            self.card.set_items(items, age, used_index, stats=stats)
             self._update_hidden()
+            self._maybe_notify(items, stats)
 
         def failed(e):
             if self._closed or token != self._scan_id:
                 return
             self.card.set_items([], age, used_index, error=str(e))
+            self.app.notify("errors", "Installer scan failed", str(e), "installers")
 
         self.app.jobs.run(work, on_done=done, on_error=failed)
+
+    def _maybe_notify(self, items, stats):
+        if not items:
+            self._last_notice = (0, 0)
+            return
+        total = sum(i.get("size", 0) for i in items)
+        signature = (len(items), total)
+        if signature == self._last_notice:
+            return
+        self._last_notice = signature
+        dups = sum(1 for i in items if i.get("duplicate_of"))
+        if dups:
+            self.app.notify("duplicates", "Possible duplicate installers",
+                            f"{dups} old cop{'ies' if dups != 1 else 'y'} could be cleared safely.",
+                            "installers")
+        else:
+            self.app.notify("installers", "Old installers found",
+                            f"{len(items)} file{'s' if len(items) != 1 else ''} \u00b7 "
+                            f"{A.human_size(total)} can be cleared.", "installers")
+
+    def _protect(self, item):
+        path = item.get("path") or ""
+        try:
+            entry = self.app.protection.add(path)
+        except Exception as e:
+            self.app.toast(str(e) or "Could not protect that installer.", "error")
+            return
+        self.app.toast(f"\u201c{entry['name']}\u201d is protected and will be skipped.", "good")
+        self.app.notify("protection", "Installer protected",
+                        f"{entry['name']} will never be suggested for cleanup.", "protection")
+        self.app.protection_page.refresh()
+        self._scan()
 
     def _show_hidden(self):
         self.app.state.set("ignored_installers", [])
@@ -933,19 +1199,31 @@ class InstallersPage(Page):
         self.app.toast("Hidden installers are visible again.", "good")
 
     def _ask_delete(self, chosen):
+        allowed, blocked = self.app.protection.filter_paths([i["path"] for i in chosen])
+        if not allowed:
+            self.app.toast("Those files are protected, so nothing was selected.", "warn")
+            return
+        by_path = {i["path"]: i for i in chosen}
+        chosen = [by_path[p] for p in allowed if p in by_path]
         n = len(chosen)
         size = sum(i.get("size", 0) for i in chosen)
         more = "s" if n != 1 else ""
+        note = ""
+        if blocked:
+            note = f" {len(blocked)} protected file{'s were' if len(blocked) != 1 else ' was'} left out."
         self.app.confirm(
             f"Move {n} installer{more} to the Recycle Bin?",
-            "They will disappear from this list. If you change your mind, open the Recycle Bin and restore them.",
+            "They will disappear from this list. If you change your mind, open the Recycle Bin and restore them."
+            + note,
             detail=f"{count(n)} file{more}  \u00b7  {A.human_size(size)}",
             confirm="Move to Recycle Bin",
-            on_confirm=lambda: self._remove([i["path"] for i in chosen], n))
+            on_confirm=lambda: self._remove(allowed, n))
 
     def _remove(self, paths, n):
+        blocked = []
+
         def work():
-            moved, failed = I.remove(paths)
+            moved, failed = I.remove(paths, protection=self.app.protection, blocked=blocked)
             try:
                 self.app.index.remove_paths(paths)
             except Exception:
@@ -956,6 +1234,12 @@ class InstallersPage(Page):
             moved, failed = result
             if moved:
                 self.app.toast(f"Moved {moved} installer{'s' if moved != 1 else ''} to the Recycle Bin.", "good")
+                self.app.notify("installers", "Installers cleared",
+                                f"{moved} file{'s' if moved != 1 else ''} moved to the Recycle Bin.",
+                                "installers")
+            if blocked:
+                self.app.toast(f"{len(blocked)} protected file{'s were' if len(blocked) != 1 else ' was'} "
+                               "left alone.", "warn")
             if failed:
                 self.app.toast(f"{len(failed)} file{'s' if len(failed) != 1 else ''} could not be moved.",
                                "warn")
@@ -964,6 +1248,7 @@ class InstallersPage(Page):
 
         def failed(e):
             self.app.toast(f"Could not move the files: {e}", "error")
+            self.app.notify("errors", "Could not move installers", str(e), "installers")
 
         self.app.jobs.run(work, on_done=done, on_error=failed)
 
@@ -1082,7 +1367,7 @@ class BlueprintCard(Card):
         cx = (x1 + x2) / 2
         rr(self, cx - T.s(40), y + T.s(19), cx + T.s(40), y + T.s(43), T.s(7), fill=T.ACCENT_SOFT,
            outline="")
-        draw_glyph(self, "folder", cx - T.s(27), y + T.s(31), T.ACCENT_D, T.s(12), width=T.s(1.4))
+        draw_icon(self, "folder_tree", cx - T.s(27), y + T.s(31), T.s(13), T.ACCENT_D)
         self.create_text(cx - T.s(16), y + T.s(31), text="This PC", font=T.F(8, "bold"), fill=T.ACCENT_D,
                          anchor="w")
         if record:
@@ -1106,8 +1391,7 @@ class BlueprintCard(Card):
             bcx = bx + box_w / 2
             self.create_line(bcx, y + T.s(64), bcx, by, fill="#CBD8DC", width=T.s(1.1))
             rr(self, bx, by, bx + box_w, by + box_h, T.s(7), fill=T.CARD, outline=T.LINE)
-            draw_duo(self, glyph, bcx, by + T.s(16), T.s(17), primary=T.ACCENT_D,
-                     secondary=mix(T.ACCENT, "#FFFFFF", 0.6), bg=T.CARD)
+            draw_icon(self, glyph, bcx, by + T.s(16), T.s(18), T.ACCENT_D)
             self.create_text(bcx, by + T.s(33), text=lbl, font=T.F(7, "bold"), fill=T.SUB,
                              anchor="center")
 
@@ -1248,7 +1532,7 @@ class WallpaperCard(Card):
             yy = y + T.s(18) + i * T.s(26)
             self.create_line(x + T.s(18), yy, x + w - T.s(18), yy, fill=col, width=T.s(10),
                              capstyle="round")
-        draw_glyph(self, "wallpaper", x + w / 2, y + h / 2, T.FAINT, T.s(30), width=T.s(1.8))
+        draw_icon(self, "wallpaper", x + w / 2, y + h / 2, T.s(32), T.FAINT)
 
 
 class HistoryCard(Card):
@@ -1336,7 +1620,7 @@ class HistoryCard(Card):
         if not self.records:
             cy = T.s(self.HEAD) + (self.H - T.s(self.HEAD)) * 0.44
             circle(self, W / 2, cy, T.s(23), fill=T.TRACK, outline="")
-            draw_glyph(self, "blueprint", W / 2, cy, T.FAINT, T.s(21), width=T.s(1.7))
+            draw_icon(self, "blueprint", W / 2, cy, T.s(24), T.FAINT)
             self.create_text(W / 2, cy + T.s(38), text="Nothing saved yet", font=T.F(12, "bold"),
                              fill=T.TEXT, anchor="center")
             self.create_text(W / 2, cy + T.s(58),
@@ -1358,8 +1642,7 @@ class HistoryCard(Card):
             wp_only = rec.get("kind") == "wallpaper"
             fill, ink = (T.IMAGE_FILL, T.IMAGE_INK) if wp_only else (T.ACCENT_SOFT, T.ACCENT_D)
             rr(self, T.s(20), y + T.s(12), T.s(54), y + T.s(46), T.s(9), fill=fill, outline="")
-            draw_glyph(self, "wallpaper" if wp_only else "blueprint", T.s(37), y + T.s(29), ink,
-                       T.s(17), width=T.s(1.6))
+            draw_icon(self, "wallpaper" if wp_only else "blueprint", T.s(37), y + T.s(29), T.s(18), ink)
             title = rec.get("created") or "Saved blueprint"
             pc = rec.get("pc") or ""
             if pc and not wp_only:
@@ -1405,7 +1688,7 @@ class BlueprintPage(Page):
         super().__init__(parent, app, "Blueprint",
                          "The shape of your PC, ready for a new one.")
         self.import_btn = Button(self.head_right, app.motion, "Import\u2026", self._import, style="secondary",
-                                 h=T.s(36), size=9, icon="plus")
+                                 h=T.s(36), size=9, icon="import")
         self.import_btn.pack()
         self.top = tk.Frame(self, bg=T.BG, height=T.s(310))
         self.top.pack(fill="x", padx=(T.s(40), T.s(36)), pady=(T.s(19), 0))
@@ -1494,6 +1777,8 @@ class BlueprintPage(Page):
                 if record:
                     self.refresh()
                     self.app.toast("Blueprint saved \u2014 folders and wallpaper are safe.", "good")
+                    self.app.notify("blueprint", "Blueprint saved",
+                                    f"{count(record.get('folder_count', 0))} folders remembered.", "blueprint")
                 else:
                     self.dna_card.set_record(None)
                     self.refresh()
@@ -1506,6 +1791,7 @@ class BlueprintPage(Page):
                 self.dna_card.set_record(None)
                 self.refresh()
                 self.app.toast(f"Could not save the blueprint: {e}", "error")
+                self.app.notify("errors", "Blueprint could not be saved", str(e), "blueprint")
 
         self.app.jobs.run(work, on_done=done, on_error=failed)
 
@@ -1627,9 +1913,12 @@ class BlueprintPage(Page):
 
         def done(out):
             self.app.toast("Blueprint exported. Keep the .clickdna file somewhere safe.", "good")
+            self.app.notify("blueprint", "Blueprint exported",
+                            os.path.basename(path) + " is ready to copy to another PC.", "blueprint")
 
         def failed(e):
             self.app.toast(f"Could not export: {e}", "error")
+            self.app.notify("errors", "Blueprint export failed", str(e), "blueprint")
 
         self.app.jobs.run(work, on_done=done, on_error=failed)
 
@@ -1646,9 +1935,13 @@ class BlueprintPage(Page):
         def done(record):
             self.refresh()
             self.app.toast("Blueprint imported. Restore it whenever you're ready.", "good")
+            self.app.notify("blueprint", "Blueprint imported",
+                            "Restore it whenever you're ready.", "blueprint")
 
         def failed(e):
             self.app.toast(f"Could not import: {e}", "error")
+            self.app.notify("errors", "Blueprint import failed",
+                            f"{e} \u2014 the file was left untouched.", "blueprint")
 
         self.app.jobs.run(work, on_done=done, on_error=failed)
 
@@ -1686,7 +1979,743 @@ class BlueprintPage(Page):
         super().destroy()
 
 
-# ------------------------------------------------------------------- settings
+# ----------------------------------------------------------------- protection
+class ProtectionCard(Card):
+    HEAD = 92
+    ROW = 64
+    FOOT = 60
+
+    def __init__(self, parent, motion, on_remove, on_reveal, on_copy):
+        super().__init__(parent, motion, bg=T.BG, radius=18)
+        self.entries, self.selected = [], -1
+        self.hover = -1
+        self.on_remove, self.on_reveal, self.on_copy = on_remove, on_reveal, on_copy
+        self.scroll = Spring(motion, self, 0.0, response=0.22, eps=0.4)
+        self.reveal.jump(1.0)
+        self.remove_btn = Button(self, motion, "Remove protection", self._remove, style="quiet",
+                                 bg=T.CARD, h=T.s(32), size=9, enabled=False)
+        self.bind("<MouseWheel>", self._wheel)
+        self.bind("<Motion>", self._move)
+        self.bind("<Leave>", lambda e: self._set_hover(-1))
+        self.bind("<ButtonPress-1>", self._click)
+        self.bind("<Double-Button-1>", self._double)
+        self.bind("<Button-3>", self._menu)
+        self.bind("<Configure>", lambda e: self.after_idle(self._place_buttons), add="+")
+        self.redraw()
+
+    def set_entries(self, entries):
+        self.entries = list(entries or [])
+        if self.selected >= len(self.entries):
+            self.selected = len(self.entries) - 1
+        self.scroll.jump(0)
+        self.redraw()
+
+    def _view_h(self):
+        return max(0, self.H - T.s(self.HEAD) - T.s(self.FOOT))
+
+    def _max_scroll(self):
+        return max(0, len(self.entries) * T.s(self.ROW) - self._view_h())
+
+    def _row_at(self, y):
+        if not (T.s(self.HEAD) <= y <= self.H - T.s(self.FOOT)):
+            return -1
+        i = int((y - T.s(self.HEAD) + self.scroll.value) // T.s(self.ROW))
+        return i if 0 <= i < len(self.entries) else -1
+
+    def _wheel(self, e):
+        if self.entries:
+            self.scroll.to(clamp(self.scroll.target - (e.delta / 120.0) * T.s(self.ROW) * 1.6,
+                                 0, self._max_scroll()))
+
+    def _set_hover(self, i):
+        if i != self.hover:
+            self.hover = i
+            self.configure(cursor="hand2" if i >= 0 else "")
+            self.redraw()
+
+    def _move(self, e):
+        self._set_hover(self._row_at(e.y))
+
+    def _click(self, e):
+        i = self._row_at(e.y)
+        self.selected = i
+        self.redraw()
+
+    def _double(self, e):
+        i = self._row_at(e.y)
+        if i >= 0:
+            self.on_reveal(self.entries[i])
+
+    def _menu(self, e):
+        i = self._row_at(e.y)
+        if i < 0:
+            return
+        entry = self.entries[i]
+        m = tk.Menu(self, tearoff=0, bg=T.CARD, fg=T.TEXT, activebackground=T.ACCENT_SOFT,
+                    activeforeground=T.TEXT, font=T.F(9), bd=0)
+        m.add_command(label="Show in Explorer", command=lambda: self.on_reveal(entry))
+        m.add_command(label="Copy full path", command=lambda: self.on_copy(entry["path"]))
+        m.add_separator()
+        m.add_command(label="Remove protection", command=lambda: self.on_remove(entry))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def _remove(self):
+        if 0 <= self.selected < len(self.entries):
+            self.on_remove(self.entries[self.selected])
+
+    def redraw(self):
+        super().redraw()
+        if self.W >= 10:
+            self._place_buttons()
+
+    def _place_buttons(self):
+        if self.W < 10 or not self.winfo_exists():
+            return
+        if self.entries:
+            self.remove_btn.set_enabled(0 <= self.selected < len(self.entries))
+            self.remove_btn.place(x=self.W - T.s(22) - self.remove_btn.w, y=self.H - T.s(46))
+        else:
+            self.remove_btn.place_forget()
+
+    def draw(self):
+        if self.W < 10:
+            return
+        if not self.entries:
+            cx, cy = self.W / 2, self.H * 0.40
+            circle(self, cx, cy, T.s(27), fill=T.ACCENT_SOFT, outline="")
+            draw_glyph(self, "protection", cx, cy, T.ACCENT_D, T.s(24), width=T.s(2.0))
+            self.create_text(cx, cy + T.s(46), text="Nothing is protected yet",
+                             font=T.F(13, "bold"), fill=T.TEXT, anchor="center")
+            self.create_text(cx, cy + T.s(68),
+                             text="Add a file or folder above. ClickScope will never suggest it for cleanup.",
+                             font=T.F(9), fill=T.SUB, anchor="center",
+                             width=min(T.s(500), self.W - T.s(80)))
+            return
+        self.create_rectangle(T.s(8), 3, self.W - T.s(8), T.s(self.HEAD), fill=T.CARD, outline="")
+        self.create_text(T.s(24), T.s(18), text="PROTECTED ITEMS", font=T.F(8, "bold"), fill=T.FAINT,
+                         anchor="w")
+        folders = sum(1 for e in self.entries if e.get("kind") == "folder")
+        files = len(self.entries) - folders
+        self.text(T.s(24), T.s(29), str(len(self.entries)), 24, "bold", fill=T.TEXT)
+        self.create_text(T.s(24) + measure(str(len(self.entries)), 24, "bold") + T.s(12), T.s(43),
+                         text=f"item{'s' if len(self.entries) != 1 else ''}  \u00b7  "
+                              f"{files} file{'s' if files != 1 else ''}  \u00b7  "
+                              f"{folders} folder{'s' if folders != 1 else ''}",
+                         font=T.F(9), fill=T.SUB, anchor="w")
+        self.create_text(T.s(24), T.s(78), text="Cleanup suggestions and installer scans always skip these.",
+                         font=T.F(8), fill=T.GREEN, anchor="w")
+        self.create_line(T.s(20), T.s(self.HEAD), self.W - T.s(20), T.s(self.HEAD), fill=T.LINE)
+        row = T.s(self.ROW)
+        view = self._view_h()
+        first = max(0, int(self.scroll.value // row) - 1)
+        last = min(len(self.entries), int((self.scroll.value + view) // row) + 2)
+        meta_w = T.s(96)
+        for i in range(first, last):
+            entry = self.entries[i]
+            y = T.s(self.HEAD) + i * row - self.scroll.value
+            if y + row < T.s(self.HEAD) - 2 or y > self.H - T.s(self.FOOT) + 2:
+                continue
+            if i == self.selected:
+                rr(self, T.s(8), y + 3, self.W - T.s(8), y + row - 3, T.s(10), fill=T.ACCENT_SOFT,
+                   outline="")
+            elif i == self.hover:
+                rr(self, T.s(8), y + 3, self.W - T.s(8), y + row - 3, T.s(10), fill=T.HOVER, outline="")
+            rr(self, T.s(20), y + T.s(13), T.s(56), y + T.s(49), T.s(10), fill=T.ACCENT_SOFT, outline="")
+            draw_glyph(self, "protection", T.s(38), y + T.s(31), T.ACCENT_D, T.s(18), width=T.s(1.7))
+            name_x = T.s(68)
+            avail = self.W - name_x - meta_w - T.s(28)
+            self.create_text(name_x, y + T.s(14), text=ellipsize(entry.get("name", ""), 10, "bold", avail),
+                             font=T.F(10, "bold"), fill=T.TEXT, anchor="w")
+            self.create_text(name_x, y + T.s(35),
+                             text=middle_ellipsize(entry.get("path", ""), 9, "normal", avail),
+                             font=T.F(9), fill=T.SUB, anchor="w")
+            kind = "Folder" if entry.get("kind") == "folder" else "File"
+            badge_w = measure(kind, 8, "bold") + T.s(18)
+            bx1 = self.W - T.s(24) - badge_w
+            rr(self, bx1, y + T.s(20), self.W - T.s(24), y + T.s(41), T.s(10),
+               fill=T.ACCENT_SOFT if kind == "Folder" else T.TRACK, outline="")
+            self.create_text((bx1 + self.W - T.s(24)) / 2, y + T.s(30), text=kind, font=T.F(8, "bold"),
+                             fill=T.ACCENT_D if kind == "Folder" else T.SUB, anchor="center")
+            if i < len(self.entries) - 1:
+                self.create_line(T.s(68), y + row - 1, self.W - T.s(24), y + row - 1, fill=T.LINE)
+        self.create_rectangle(T.s(8), self.H - T.s(self.FOOT), self.W - T.s(8), self.H - 5, fill=T.CARD,
+                              outline="")
+        self.create_line(T.s(20), self.H - T.s(self.FOOT), self.W - T.s(20),
+                         self.H - T.s(self.FOOT), fill=T.LINE)
+        self.create_text(T.s(24), self.H - T.s(self.FOOT) / 2,
+                         text="Protection is checked before age or size, every time.",
+                         font=T.F(9), fill=T.FAINT, anchor="w")
+        if self._max_scroll() > 0:
+            frac = self._view_h() / (len(self.entries) * row)
+            th = max(T.s(30), self._view_h() * frac)
+            ty = T.s(self.HEAD) + (self._view_h() - th) * (clamp(self.scroll.value, 0,
+                                                                 self._max_scroll()) / self._max_scroll())
+            rr(self, self.W - T.s(12), ty, self.W - T.s(8), ty + th, T.s(2), fill=T.LINE2, outline="")
+
+
+class ProtectionPage(Page):
+    def __init__(self, parent, app):
+        super().__init__(parent, app, "Protection",
+                         "The files and folders ClickScope must never suggest.")
+        self.add_folder_btn = Button(self.head_right, app.motion, "Add folder", self._add_folder,
+                                     style="secondary", h=T.s(36), size=9, icon="folder")
+        self.add_file_btn = Button(self.head_right, app.motion, "Add file", self._add_file,
+                                   style="primary", h=T.s(36), size=9, icon="document")
+        self.add_folder_btn.pack(side="right", padx=(T.s(8), 0))
+        self.add_file_btn.pack(side="right")
+        self.body = tk.Frame(self, bg=T.BG)
+        self.body.pack(fill="both", expand=True, padx=(T.s(40), T.s(36)), pady=(T.s(19), T.s(26)))
+        self.card = ProtectionCard(self.body, app.motion, self._ask_remove, self._reveal, self._copy)
+        self.card.place(x=0, y=0, relwidth=1, relheight=1)
+
+    def on_show(self):
+        self.refresh()
+        self.card.enter()
+
+    def refresh(self):
+        try:
+            entries = self.app.protection.list_entries()
+        except Exception:
+            entries = []
+        self.card.set_entries(entries)
+
+    def _add_file(self):
+        path = filedialog.askopenfilename(parent=self, title="Protect a file",
+                                          initialdir=os.path.expanduser("~"))
+        if path:
+            self._add(path)
+
+    def _add_folder(self):
+        path = filedialog.askdirectory(parent=self, title="Protect a folder",
+                                       initialdir=os.path.expanduser("~"))
+        if path:
+            self._add(path)
+
+    def _add(self, path):
+        try:
+            entry = self.app.protection.add(path)
+        except Exception as e:
+            self.app.toast(str(e) or "Could not protect that item.", "error")
+            return
+        self.refresh()
+        self.app.toast(f"\u201c{entry['name']}\u201d is protected.", "good")
+        self.app.notify("protection", "Item protected",
+                        f"{entry['name']} will never be suggested for cleanup.", "protection")
+        if self.app.search._query.strip():
+            self.app.search._refilter()
+
+    def _ask_remove(self, entry):
+        self.app.confirm(
+            "Remove this protection?",
+            f"\u201c{entry['name']}\u201d will become eligible for cleanup suggestions again. The file "
+            "itself is not touched either way.",
+            confirm="Remove protection",
+            on_confirm=lambda: self._remove(entry))
+
+    def _remove(self, entry):
+        self.app.protection.remove(entry.get("path"))
+        self.refresh()
+        self.app.toast("Protection removed.", "good")
+        if self.app.search._query.strip():
+            self.app.search._refilter()
+
+    def _reveal(self, entry):
+        if not A.reveal_path(entry.get("path") or ""):
+            self.app.toast("That item is no longer there.", "warn")
+
+    def _copy(self, text):
+        if A.copy_text(text):
+            self.app.toast("Path copied.", "good")
+
+
+# ------------------------------------------------------------------- websites
+def _pretty_url(url):
+    raw = str(url or "")
+    for prefix in ("https://", "http://"):
+        if raw.lower().startswith(prefix):
+            raw = raw[len(prefix):]
+    return raw.rstrip("/") or url
+
+
+class WebsiteDialog(tk.Toplevel):
+    """A small modal for adding or editing one remembered website."""
+
+    def __init__(self, parent, motion, on_save, item=None, categories=W.CATEGORIES):
+        super().__init__(parent)
+        self.on_save = on_save
+        self.item = item
+        self.title("Edit website" if item else "Add website")
+        self.configure(bg=T.BG)
+        self.resizable(False, False)
+        self.transient(parent.winfo_toplevel())
+        body = tk.Frame(self, bg=T.BG, padx=T.s(24), pady=T.s(20))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Edit website" if item else "Add a website", font=T.F(16, "bold"),
+                 fg=T.TEXT, bg=T.BG, anchor="w").pack(fill="x")
+        tk.Label(body, text="Saved on this PC only. No page content is read.",
+                 font=T.F(9), fg=T.SUB, bg=T.BG, anchor="w").pack(fill="x", pady=(T.s(3), T.s(16)))
+        self.name = tk.Entry(body, font=T.F(10), bg=T.CARD, fg=T.TEXT, relief="flat",
+                             highlightthickness=1, highlightbackground=T.LINE2, highlightcolor=T.ACCENT,
+                             insertbackground=T.TEXT, width=46)
+        self.url = tk.Entry(body, font=T.F(10), bg=T.CARD, fg=T.TEXT, relief="flat",
+                            highlightthickness=1, highlightbackground=T.LINE2, highlightcolor=T.ACCENT,
+                            insertbackground=T.TEXT, width=46)
+        for label, widget, hint in (("Name", self.name, "For example: Studio notes"),
+                                    ("Address", self.url, "example.com/page")):
+            tk.Label(body, text=label, font=T.F(8, "bold"), fg=T.FAINT, bg=T.BG, anchor="w").pack(
+                fill="x", pady=(T.s(8), T.s(4)))
+            widget.pack(fill="x", ipady=T.s(7))
+            tk.Label(body, text=hint, font=T.F(8), fg=T.FAINT, bg=T.BG, anchor="w").pack(
+                fill="x", pady=(T.s(3), 0))
+        tk.Label(body, text="Category", font=T.F(8, "bold"), fg=T.FAINT, bg=T.BG, anchor="w").pack(
+            fill="x", pady=(T.s(12), T.s(4)))
+        self.cat = Chips(body, motion, [(c, c) for c in categories], bg=T.BG, h=T.s(30))
+        self.cat.pack(fill="x")
+        self.error = tk.Label(body, text="", font=T.F(8, "bold"), fg=T.RED, bg=T.BG, anchor="w",
+                              wraplength=T.s(360), justify="left")
+        self.error.pack(fill="x", pady=(T.s(8), 0))
+        row = tk.Frame(body, bg=T.BG)
+        row.pack(fill="x", pady=(T.s(12), 0))
+        Button(row, motion, "Cancel", self._close, style="quiet", bg=T.BG, h=T.s(36), size=9).pack(
+            side="right")
+        Button(row, motion, "Save website" if not item else "Save changes", self._save, style="primary",
+               bg=T.BG, h=T.s(36), size=9).pack(side="right", padx=(0, T.s(8)))
+        if item:
+            self.name.insert(0, item.get("name", ""))
+            self.url.insert(0, item.get("url", ""))
+            cat = item.get("category") or W.DEFAULT_CATEGORY
+            if cat in categories:
+                self.cat.selected = cat
+                self.cat.redraw()
+        self.bind("<Return>", lambda e: self._save())
+        self.bind("<Escape>", lambda e: self._close())
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.update_idletasks()
+        try:
+            root = parent.winfo_toplevel()
+            w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+            x = root.winfo_rootx() + (root.winfo_width() - w) // 2
+            y = root.winfo_rooty() + (root.winfo_height() - h) // 2
+            self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except tk.TclError:
+            pass
+        self.grab_set()
+        self.name.focus_set()
+
+    def _save(self):
+        name = self.name.get().strip()
+        url = self.url.get().strip()
+        category = self.cat.selected or W.DEFAULT_CATEGORY
+        try:
+            error = self.on_save(name, url, category)
+        except Exception as e:
+            error = str(e) or "Could not save that website."
+        if error:
+            self.error.configure(text=error)
+            return
+        self._close()
+
+    def _close(self):
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
+class WebsitesCard(Card):
+    HEAD = 92
+    ROW = 66
+    FOOT = 58
+
+    def __init__(self, parent, motion, on_open, on_edit, on_delete, on_copy, on_export, on_import):
+        super().__init__(parent, motion, bg=T.BG, radius=18)
+        self.items, self.selected, self.hover = [], -1, -1
+        self.categories = []
+        self.on_open, self.on_edit, self.on_delete = on_open, on_edit, on_delete
+        self.on_copy, self.on_export, self.on_import = on_copy, on_export, on_import
+        self.scroll = Spring(motion, self, 0.0, response=0.22, eps=0.4)
+        self.reveal.jump(1.0)
+        self.export_btn = Button(self, motion, "Export list", self.on_export, style="quiet", bg=T.CARD,
+                                 h=T.s(30), size=9)
+        self.import_btn = Button(self, motion, "Import list", self.on_import, style="quiet", bg=T.CARD,
+                                 h=T.s(30), size=9)
+        self.bind("<MouseWheel>", self._wheel)
+        self.bind("<Motion>", self._move)
+        self.bind("<Leave>", lambda e: self._set_hover(-1))
+        self.bind("<ButtonPress-1>", self._click)
+        self.bind("<Double-Button-1>", self._double)
+        self.bind("<Button-3>", self._menu)
+        self.bind("<Configure>", lambda e: self.after_idle(self._place_buttons), add="+")
+        self.redraw()
+
+    def set_items(self, items, categories=None):
+        self.items = list(items or [])
+        self.categories = list(categories or [])
+        if self.selected >= len(self.items):
+            self.selected = len(self.items) - 1
+        self.scroll.jump(0)
+        self.redraw()
+
+    def _view_h(self):
+        return max(0, self.H - T.s(self.HEAD) - T.s(self.FOOT))
+
+    def _max_scroll(self):
+        return max(0, len(self.items) * T.s(self.ROW) - self._view_h())
+
+    def _row_at(self, y):
+        if not (T.s(self.HEAD) <= y <= self.H - T.s(self.FOOT)):
+            return -1
+        i = int((y - T.s(self.HEAD) + self.scroll.value) // T.s(self.ROW))
+        return i if 0 <= i < len(self.items) else -1
+
+    def _wheel(self, e):
+        if self.items:
+            self.scroll.to(clamp(self.scroll.target - (e.delta / 120.0) * T.s(self.ROW) * 1.6,
+                                 0, self._max_scroll()))
+
+    def _set_hover(self, i):
+        if i != self.hover:
+            self.hover = i
+            self.configure(cursor="hand2" if i >= 0 else "")
+            self.redraw()
+
+    def _move(self, e):
+        self._set_hover(self._row_at(e.y))
+
+    def _click(self, e):
+        self.selected = self._row_at(e.y)
+        self.redraw()
+
+    def _double(self, e):
+        i = self._row_at(e.y)
+        if i >= 0:
+            self.on_open(self.items[i])
+
+    def _menu(self, e):
+        i = self._row_at(e.y)
+        if i < 0:
+            return
+        item = self.items[i]
+        m = tk.Menu(self, tearoff=0, bg=T.CARD, fg=T.TEXT, activebackground=T.ACCENT_SOFT,
+                    activeforeground=T.TEXT, font=T.F(9), bd=0)
+        m.add_command(label="Open website", command=lambda: self.on_open(item))
+        m.add_command(label="Edit\u2026", command=lambda: self.on_edit(item))
+        m.add_command(label="Copy address", command=lambda: self.on_copy(item.get("url", "")))
+        m.add_separator()
+        m.add_command(label="Forget this website", command=lambda: self.on_delete(item))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def redraw(self):
+        super().redraw()
+        if self.W >= 10:
+            self._place_buttons()
+
+    def _place_buttons(self):
+        if self.W < 10 or not self.winfo_exists():
+            return
+        self.import_btn.place(x=self.W - T.s(22) - self.import_btn.w, y=self.H - T.s(43))
+        self.export_btn.place(x=self.W - T.s(30) - self.import_btn.w - self.export_btn.w,
+                              y=self.H - T.s(43))
+
+    def draw(self):
+        if self.W < 10:
+            return
+        if not self.items:
+            cx, cy = self.W / 2, self.H * 0.38
+            circle(self, cx, cy, T.s(27), fill=T.ACCENT_SOFT, outline="")
+            draw_glyph(self, "globe", cx, cy, T.ACCENT_D, T.s(26), width=T.s(1.8))
+            self.create_text(cx, cy + T.s(46), text="No websites remembered yet",
+                             font=T.F(13, "bold"), fill=T.TEXT, anchor="center")
+            self.create_text(cx, cy + T.s(68),
+                             text="Add an address, or import the bookmarks you already saved in Firefox.",
+                             font=T.F(9), fill=T.SUB, anchor="center",
+                             width=min(T.s(520), self.W - T.s(80)))
+        else:
+            self.create_rectangle(T.s(8), 3, self.W - T.s(8), T.s(self.HEAD), fill=T.CARD, outline="")
+            self.create_text(T.s(24), T.s(18), text="WEBSITE MEMORY", font=T.F(8, "bold"),
+                             fill=T.FAINT, anchor="w")
+            self.text(T.s(24), T.s(29), str(len(self.items)), 24, "bold", fill=T.TEXT)
+            self.create_text(T.s(24) + measure(str(len(self.items)), 24, "bold") + T.s(12), T.s(43),
+                             text=f"address{'es' if len(self.items) != 1 else ''} saved locally",
+                             font=T.F(9), fill=T.SUB, anchor="w")
+            cats = len({i.get("category") for i in self.items})
+            self.create_text(T.s(24), T.s(78),
+                             text=f"{cats} categor{'ies' if cats != 1 else 'y'}  \u00b7  "
+                                  "names and addresses only, never page content",
+                             font=T.F(8), fill=T.FAINT, anchor="w")
+            self.create_line(T.s(20), T.s(self.HEAD), self.W - T.s(20), T.s(self.HEAD), fill=T.LINE)
+            row = T.s(self.ROW)
+            view = self._view_h()
+            first = max(0, int(self.scroll.value // row) - 1)
+            last = min(len(self.items), int((self.scroll.value + view) // row) + 2)
+            for i in range(first, last):
+                item = self.items[i]
+                y = T.s(self.HEAD) + i * row - self.scroll.value
+                if y + row < T.s(self.HEAD) - 2 or y > self.H - T.s(self.FOOT) + 2:
+                    continue
+                if i == self.selected:
+                    rr(self, T.s(8), y + 3, self.W - T.s(8), y + row - 3, T.s(10),
+                       fill=T.ACCENT_SOFT, outline="")
+                elif i == self.hover:
+                    rr(self, T.s(8), y + 3, self.W - T.s(8), y + row - 3, T.s(10), fill=T.HOVER,
+                       outline="")
+                rr(self, T.s(20), y + T.s(14), T.s(56), y + T.s(50), T.s(10), fill=T.ACCENT_SOFT,
+                   outline="")
+                draw_glyph(self, "globe", T.s(38), y + T.s(32), T.ACCENT_D, T.s(19), width=T.s(1.4))
+                cat = item.get("category") or W.DEFAULT_CATEGORY
+                badge_w = min(T.s(120), measure(cat, 8, "bold") + T.s(20))
+                bx1 = self.W - T.s(24) - badge_w
+                rr(self, bx1, y + T.s(21), self.W - T.s(24), y + T.s(44), T.s(11), fill=T.TRACK,
+                   outline="")
+                self.create_text((bx1 + self.W - T.s(24)) / 2, y + T.s(32),
+                                 text=ellipsize(cat, 8, "bold", badge_w - T.s(10)),
+                                 font=T.F(8, "bold"), fill=T.SUB, anchor="center")
+                name_x = T.s(68)
+                avail = max(T.s(90), bx1 - name_x - T.s(14))
+                self.create_text(name_x, y + T.s(15), text=ellipsize(item.get("name", ""), 10, "bold", avail),
+                                 font=T.F(10, "bold"), fill=T.TEXT, anchor="w")
+                self.create_text(name_x, y + T.s(37),
+                                 text=middle_ellipsize(_pretty_url(item.get("url", "")), 9, "normal", avail),
+                                 font=T.F(9), fill=T.SUB, anchor="w")
+                if i < len(self.items) - 1:
+                    self.create_line(T.s(68), y + row - 1, self.W - T.s(24), y + row - 1, fill=T.LINE)
+            self.create_rectangle(T.s(8), self.H - T.s(self.FOOT), self.W - T.s(8), self.H - 5,
+                                  fill=T.CARD, outline="")
+            self.create_line(T.s(20), self.H - T.s(self.FOOT), self.W - T.s(20),
+                             self.H - T.s(self.FOOT), fill=T.LINE)
+            self.create_text(T.s(24), self.H - T.s(self.FOOT) / 2,
+                             text="Double-click a website to open it in your browser.",
+                             font=T.F(9), fill=T.FAINT, anchor="w")
+            if self._max_scroll() > 0:
+                frac = self._view_h() / (len(self.items) * row)
+                th = max(T.s(30), self._view_h() * frac)
+                ty = T.s(self.HEAD) + (self._view_h() - th) * (
+                    clamp(self.scroll.value, 0, self._max_scroll()) / self._max_scroll())
+                rr(self, self.W - T.s(12), ty, self.W - T.s(8), ty + th, T.s(2), fill=T.LINE2,
+                   outline="")
+
+
+class WebsitesPage(Page):
+    def __init__(self, parent, app):
+        super().__init__(parent, app, "Websites",
+                         "The addresses worth keeping, remembered on this PC.")
+        self.import_btn = Button(self.head_right, app.motion, "Import Firefox", self._import_firefox,
+                                 style="secondary", h=T.s(36), size=9, icon="import")
+        self.add_btn = Button(self.head_right, app.motion, "Add website", self._add, style="primary",
+                              h=T.s(36), size=9, icon="plus")
+        self.import_btn.pack(side="right", padx=(T.s(8), 0))
+        self.add_btn.pack(side="right")
+        bar = tk.Frame(self, bg=T.BG)
+        bar.pack(fill="x", padx=(T.s(40), T.s(36)), pady=(T.s(16), 0))
+        self.field = SearchField(bar, app.motion, on_change=self._typed)
+        self.field.pack(fill="x")
+        chips = tk.Frame(self, bg=T.BG)
+        chips.pack(fill="x", padx=(T.s(40), T.s(36)), pady=(T.s(7), 0))
+        self.chip_holder = tk.Frame(chips, bg=T.BG)
+        self.chip_holder.pack(fill="x")
+        self.cat_chips = None
+        self.body = tk.Frame(self, bg=T.BG)
+        self.body.pack(fill="both", expand=True, padx=(T.s(40), T.s(36)), pady=(T.s(12), T.s(26)))
+        self.card = WebsitesCard(self.body, app.motion, self._open, self._edit, self._delete,
+                                 self._copy, self._export, self._import)
+        self.card.place(x=0, y=0, relwidth=1, relheight=1)
+        self.query = ""
+        self.category = app.state.get("website_category", "All") or "All"
+        self.dialog = None
+        self._closed = False
+
+    def on_show(self):
+        self.refresh()
+        self.card.enter()
+
+    def refresh(self):
+        if not self.winfo_exists():
+            return
+        cats = self.app.websites.categories()
+        if self.category not in [c[0] for c in cats]:
+            self.category = "All"
+        options = [(key, f"{label} {n}" if key != "All" else f"All {n}") for key, label, n in cats]
+        if self.cat_chips is None:
+            self.cat_chips = Chips(self.chip_holder, self.app.motion, options,
+                                   on_change=self._cat_changed, h=T.s(30))
+            self.cat_chips.pack(fill="x")
+        else:
+            self.cat_chips.options = options
+            self.cat_chips.selected = self.category
+            self.cat_chips.redraw()
+        self.cat_chips.selected = self.category
+        rows = self.app.websites.search(self.query, self.category)
+        self.card.set_items(rows, cats)
+
+    def _typed(self, text):
+        self.query = text or ""
+        self.refresh()
+
+    def _cat_changed(self, key):
+        self.category = key
+        self.app.state.set("website_category", key)
+        self.refresh()
+
+    def _add(self):
+        self._dialog(None)
+
+    def _edit(self, item):
+        self._dialog(item)
+
+    def _dialog(self, item):
+        if self.dialog is not None and self.dialog.winfo_exists():
+            self.dialog.lift()
+            return
+
+        def save(name, url, category):
+            if item:
+                self.app.websites.update(item["id"], name=name, url=url, category=category)
+            else:
+                added, existing = self.app.websites.add(name, url, category)
+                if not added:
+                    raise ValueError(f"Already saved as \u201c{existing['name']}\u201d.")
+            self.after(30, self._saved, bool(item))
+
+        self.dialog = WebsiteDialog(self, self.app.motion, save, item=item)
+        self.dialog.bind("<Destroy>", lambda e: setattr(self, "dialog", None), add="+")
+
+    def _saved(self, edited):
+        self.refresh()
+        self.app.toast("Website changes saved." if edited else "Website added to your memory.", "good")
+        self.app.notify("websites", "Website memory updated",
+                        "Your saved addresses changed on this PC.", "websites")
+
+    def _open(self, item):
+        url = item.get("url") or ""
+        try:
+            os.startfile(url)
+        except OSError:
+            self.app.toast("Windows could not open that address.", "error")
+
+    def _delete(self, item):
+        self.app.confirm(
+            f"Forget \u201c{item.get('name', 'this website')}\u201d?",
+            "The name and address are removed from Website Memory. The website itself is not touched, "
+            "and your browser bookmarks stay exactly as they are.",
+            confirm="Forget website", tone="danger",
+            on_confirm=lambda: self._delete_now(item))
+
+    def _delete_now(self, item):
+        if self.app.websites.delete(item["id"]):
+            self.refresh()
+            self.app.toast("Website forgotten.", "good")
+
+    def _copy(self, text):
+        if A.copy_text(text):
+            self.app.toast("Address copied.", "good")
+
+    def _export(self):
+        path = filedialog.asksaveasfilename(parent=self, title="Export Website Memory",
+                                            defaultextension=".json",
+                                            initialfile="ClickScope-websites.json",
+                                            filetypes=[("Website list", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+
+        def work():
+            return self.app.websites.export_json(path)
+
+        def done(n):
+            self.app.toast(f"Exported {n} website{'s' if n != 1 else ''}.", "good")
+            self.app.notify("websites", "Website list exported",
+                            f"{n} addresses saved to {os.path.basename(path)}.", "websites")
+
+        def failed(e):
+            self.app.toast(f"Could not export the list: {e}", "error")
+
+        self.app.jobs.run(work, on_done=done, on_error=failed)
+
+    def _import(self):
+        path = filedialog.askopenfilename(parent=self, title="Import Website Memory",
+                                          filetypes=[("Website list", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+
+        def work():
+            return self.app.websites.import_json(path)
+
+        def done(result):
+            self.refresh()
+            self.app.toast(f"Added {result['added']}, skipped {result['skipped']} duplicates.", "good")
+            self.app.notify("websites", "Website list imported",
+                            f"{result['added']} added, {result['skipped']} duplicates skipped.", "websites")
+
+        def failed(e):
+            self.app.toast(f"Could not import the list: {e}", "error")
+            self.app.notify("errors", "Website import failed", str(e), "websites")
+
+        self.app.jobs.run(work, on_done=done, on_error=failed)
+
+    def _import_firefox(self):
+        self.app.toast("Reading Firefox bookmarks from a temporary copy\u2026", "info")
+
+        def work():
+            return self.app.websites.import_firefox()
+
+        def done(result):
+            self.refresh()
+            if not result.get("profiles"):
+                self.app.toast("No Firefox bookmarks were found on this PC.", "warn")
+                return
+            if result.get("added"):
+                self.app.toast(f"Imported {result['added']} bookmarks from Firefox "
+                               f"({result['skipped']} duplicates skipped).", "good")
+                self.app.notify("websites", "Firefox bookmarks imported",
+                                f"{result['added']} new addresses added to Website Memory.", "websites")
+            else:
+                self.app.toast("Every Firefox bookmark was already saved.", "good")
+            if result.get("errors"):
+                self.app.toast(f"{len(result['errors'])} Firefox profile could not be read.", "warn")
+
+        def failed(e):
+            self.app.toast(f"Could not read Firefox bookmarks: {e}", "error")
+            self.app.notify("errors", "Firefox import failed", str(e), "websites")
+
+        self.app.jobs.run(work, on_done=done, on_error=failed)
+
+    def destroy(self):
+        self._closed = True
+        super().destroy()
+
+
+# ----------------------------------------------------------------- settings
+class ScrollArea(tk.Frame):
+    """A quiet vertical scroller: wheel or trackpad, no heavy scrollbar chrome."""
+
+    def __init__(self, parent, bg=T.BG):
+        super().__init__(parent, bg=bg)
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=bg)
+        self.win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.bind("<Configure>", self._resize)
+        self.inner.bind("<Configure>", self._region)
+
+    def _resize(self, e):
+        self.canvas.itemconfigure(self.win, width=e.width)
+        self._region()
+
+    def _region(self, e=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def wheel(self, e):
+        self.canvas.yview_scroll(int(-e.delta / 120.0) * 3, "units")
+        return "break"
+
+
+# ----------------------------------------------------------------- settings
 class IndexCard(Card):
     def __init__(self, parent, motion, on_rebuild, on_clear):
         super().__init__(parent, motion, bg=T.BG, radius=18, height=T.s(252))
@@ -1852,7 +2881,7 @@ class AboutCard(Card):
             tx = pad + T.s(50)
         else:
             rr(self, pad, T.s(18), pad + T.s(34), T.s(52), T.s(8), fill=T.ACCENT, outline="")
-            draw_glyph(self, "search", pad + T.s(17), T.s(35), "#FFFFFF", T.s(16), width=T.s(1.8))
+            draw_icon(self, "search", pad + T.s(17), T.s(35), T.s(18), "#FFFFFF")
             tx = pad + T.s(44)
         self.create_text(tx, T.s(27), text="ClickScope", font=T.F(12, "bold"), fill=T.TEXT, anchor="w")
         self.create_text(tx, T.s(45), text=f"Version {A.VERSION}", font=T.F(8), fill=T.FAINT, anchor="w")
@@ -1861,11 +2890,195 @@ class AboutCard(Card):
         self.create_line(T.s(18), self.H - T.s(58), self.W - T.s(18), self.H - T.s(58), fill=T.LINE)
 
 
+# ----------------------------------------------------------------- settings
+class ProtectionSummaryCard(Card):
+    def __init__(self, parent, motion, on_open):
+        super().__init__(parent, motion, bg=T.BG, radius=18, height=T.s(236))
+        self.motion = motion
+        self.summary = {}
+        self.open_btn = Button(self, motion, "Open Protection", on_open, style="secondary", bg=T.CARD,
+                               h=T.s(34), size=9, icon="protection")
+        self.reveal.jump(1.0)
+        self.redraw()
+
+    def set_summary(self, summary):
+        self.summary = dict(summary or {})
+        self.redraw()
+
+    def redraw(self):
+        super().redraw()
+        if self.W >= 10:
+            self.open_btn.place(x=T.s(22), y=self.H - T.s(50))
+
+    def draw(self):
+        if self.W < 10:
+            return
+        pad = T.s(22)
+        self.create_text(pad, T.s(20), text="Protection", font=T.F(11, "bold"), fill=T.TEXT, anchor="w")
+        total = int(self.summary.get("total") or 0)
+        self.text(pad, T.s(40), str(total), 26, "bold", fill=T.TEXT)
+        self.create_text(pad + measure(str(total), 26, "bold") + T.s(12), T.s(57),
+                         text=f"item{'s' if total != 1 else ''} never suggested", font=T.F(9),
+                         fill=T.SUB, anchor="w")
+        self.create_line(T.s(18), T.s(92), self.W - T.s(18), T.s(92), fill=T.LINE)
+        rows = [(T.GREEN, "Checked first", "Before age, size or any cleanup rule."),
+                (T.ACCENT_D, "Never deleted", "ClickScope only moves files you confirm, to the Recycle Bin.")]
+        for i, (col, title, body) in enumerate(rows):
+            y = T.s(112) + i * T.s(38)
+            circle(self, pad + T.s(4), y, T.s(3), fill=col, outline="")
+            self.create_text(pad + T.s(14), y, text=title, font=T.F(9, "bold"), fill=T.TEXT, anchor="w")
+            self.create_text(pad + T.s(96), y, text=ellipsize(body, 8, "normal", self.W - pad - T.s(102)),
+                             font=T.F(8), fill=T.SUB, anchor="w")
+
+
+class NotificationsCard(Card):
+    def __init__(self, parent, motion, on_enabled, on_windows, on_type):
+        super().__init__(parent, motion, bg=T.BG, radius=18, height=T.s(262))
+        self.motion = motion
+        self.settings = {}
+        self.on_type = on_type
+        self.type_boxes = []
+        self.enable_switch = Switch(self, motion, True, command=on_enabled, bg=T.CARD)
+        self.windows_switch = Switch(self, motion, True, command=on_windows, bg=T.CARD)
+        self.bind("<ButtonPress-1>", self._click)
+        self.bind("<Motion>", self._move)
+        self.bind("<Leave>", lambda e: self.configure(cursor=""))
+        self.reveal.jump(1.0)
+        self.redraw()
+
+    def set_settings(self, settings):
+        self.settings = dict(settings or {})
+        self.enable_switch.set(bool(self.settings.get("enabled", True)), notify=False)
+        self.windows_switch.set(bool(self.settings.get("windows", True)), notify=False)
+        self.redraw()
+
+    def redraw(self):
+        super().redraw()
+        if self.W >= 10:
+            self.enable_switch.place(x=self.W - T.s(22) - self.enable_switch.winfo_reqwidth(), y=T.s(48))
+            self.windows_switch.place(x=self.W - T.s(22) - self.windows_switch.winfo_reqwidth(),
+                                      y=T.s(92))
+
+    def _type_at(self, x, y):
+        for key, x1, y1, x2, y2 in self.type_boxes:
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return key
+        return ""
+
+    def _click(self, e):
+        key = self._type_at(e.x, e.y)
+        if key and self.on_type:
+            enabled = bool((self.settings.get("types") or {}).get(key, True))
+            self.on_type(key, not enabled)
+
+    def _move(self, e):
+        self.configure(cursor="hand2" if self._type_at(e.x, e.y) else "")
+
+    def draw(self):
+        if self.W < 10:
+            return
+        pad = T.s(22)
+        self.create_text(pad, T.s(20), text="Notifications", font=T.F(11, "bold"), fill=T.TEXT, anchor="w")
+        self._row(pad, T.s(60), "Show notifications", "Quiet confirmations when work finishes.")
+        self.create_line(T.s(18), T.s(76), self.W - T.s(18), T.s(76), fill=T.LINE)
+        self._row(pad, T.s(104), "Windows notifications", "A toast even when ClickScope is in the taskbar.")
+        self.create_line(T.s(18), T.s(120), self.W - T.s(18), T.s(120), fill=T.LINE)
+        self.create_text(pad, T.s(138), text="Notify me about", font=T.F(9, "bold"), fill=T.TEXT, anchor="w")
+        types = self.settings.get("types") or {}
+        self.type_boxes = []
+        x, y = pad, T.s(154)
+        for key, label, _ in N.TYPES:
+            on = bool(types.get(key, True))
+            w = measure(label, 8, "bold") + T.s(22)
+            if x + w > self.W - pad:
+                x, y = pad, y + T.s(30)
+            rr(self, x, y, x + w, y + T.s(24), T.s(12), fill=T.ACCENT_SOFT if on else T.TRACK,
+               outline="")
+            circle(self, x + T.s(11), y + T.s(12), T.s(3.1),
+                   fill=T.ACCENT_D if on else T.FAINT, outline="")
+            self.create_text(x + T.s(19), y + T.s(12), text=label, font=T.F(8, "bold"),
+                             fill=T.TEXT if on else T.SUB, anchor="w")
+            self.type_boxes.append((key, x, y, x + w, y + T.s(24)))
+            x += w + T.s(5)
+        self.create_text(pad, self.H - T.s(15), text="Notifications never delete or move a file.",
+                         font=T.F(8), fill=T.FAINT, anchor="w")
+
+    def _row(self, x, y, title, sub):
+        self.create_text(x, y, text=title, font=T.F(10, "bold"), fill=T.TEXT, anchor="w")
+        self.create_text(x, y + T.s(18), text=sub, font=T.F(8), fill=T.FAINT, anchor="w")
+
+
+class StorageCard(Card):
+    def __init__(self, parent, motion, on_change, on_reset, on_backup, on_open):
+        super().__init__(parent, motion, bg=T.BG, radius=18, height=T.s(238))
+        self.motion = motion
+        self.info = {}
+        self.change_btn = Button(self, motion, "Change location\u2026", on_change, style="secondary",
+                                 bg=T.CARD, h=T.s(34), size=9, icon="folder")
+        self.reset_btn = Button(self, motion, "Use default", on_reset, style="quiet", bg=T.CARD,
+                                h=T.s(34), size=9)
+        self.backup_btn = Button(self, motion, "Back up data\u2026", on_backup, style="primary",
+                                 bg=T.CARD, h=T.s(34), size=9)
+        self.open_btn = Button(self, motion, "Open folder", on_open, style="quiet", bg=T.CARD,
+                               h=T.s(34), size=9)
+        self.reveal.jump(1.0)
+        self.redraw()
+
+    def set_info(self, info):
+        self.info = dict(info or {})
+        self.redraw()
+
+    def redraw(self):
+        super().redraw()
+        if self.W < 10:
+            return
+        self.change_btn.place(x=T.s(22), y=self.H - T.s(50))
+        self.open_btn.place(x=T.s(22) + self.change_btn.w + T.s(8), y=self.H - T.s(50))
+        self.backup_btn.place(x=self.W - T.s(22) - self.backup_btn.w, y=self.H - T.s(50))
+        self.reset_btn.place(x=self.W - T.s(30) - self.backup_btn.w - self.reset_btn.w,
+                             y=self.H - T.s(50))
+
+    def draw(self):
+        if self.W < 10:
+            return
+        pad = T.s(22)
+        self.create_text(pad, T.s(20), text="Data & backup", font=T.F(11, "bold"), fill=T.TEXT, anchor="w")
+        custom = bool(self.info.get("custom"))
+        label = "Custom location" if custom else "Default location"
+        circle(self, self.W - T.s(22) - measure(label, 8, "bold") - T.s(12), T.s(21), T.s(3.5),
+               fill=T.ACCENT if custom else T.GREEN, outline="")
+        self.create_text(self.W - T.s(22), T.s(21), text=label, font=T.F(8, "bold"), fill=T.SUB,
+                         anchor="e")
+        path = self.info.get("path") or A.APP_DIR
+        self.create_text(pad, T.s(46), text="Everything ClickScope stores lives in",
+                         font=T.F(9), fill=T.SUB, anchor="w")
+        self.create_text(pad, T.s(68), text=middle_ellipsize(path, 9, "bold", self.W - pad * 2),
+                         font=T.F(9, "bold"), fill=T.TEXT, anchor="w")
+        self.create_text(pad, T.s(92),
+                         text=f"{self.info.get('size_text', '0 B')}  \u00b7  "
+                              f"{count(self.info.get('files', 0))} files  \u00b7  "
+                              "index, settings, protection, websites and blueprints",
+                         font=T.F(8), fill=T.FAINT, anchor="w")
+        self.create_line(T.s(18), T.s(114), self.W - T.s(18), T.s(114), fill=T.LINE)
+        self.create_text(pad, T.s(132),
+                         text="Backups leave the search index out: it only holds file names and can be rebuilt.",
+                         font=T.F(8), fill=T.SUB, anchor="w")
+        if custom:
+            self.create_text(pad, T.s(152),
+                             text="Changing location copies your data. Nothing is deleted from the old folder.",
+                             font=T.F(8), fill=T.FAINT, anchor="w")
+        else:
+            self.create_text(pad, T.s(152),
+                             text="You can move this folder to another drive, or keep a verified backup.",
+                             font=T.F(8), fill=T.FAINT, anchor="w")
+
+
 class SettingsPage(Page):
     def __init__(self, parent, app):
         super().__init__(parent, app, "Settings", "A few choices, and everything stays on this PC.")
-        wrap = tk.Frame(self, bg=T.BG)
-        wrap.pack(fill="both", expand=True, padx=(T.s(40), T.s(36)), pady=(T.s(19), T.s(26)))
+        self.scroll = ScrollArea(self)
+        self.scroll.pack(fill="both", expand=True, padx=(T.s(40), T.s(36)), pady=(T.s(19), T.s(26)))
+        wrap = self.scroll.inner
         wrap.columnconfigure(0, weight=1, uniform="set")
         wrap.columnconfigure(1, weight=1, uniform="set")
         self.index_card = IndexCard(wrap, app.motion, app.rebuild_index, app.clear_index)
@@ -1875,14 +3088,40 @@ class SettingsPage(Page):
         self.behavior_card = BehaviorCard(wrap, app.motion, self._set_start, self._set_keep,
                                           app.autostart_enabled(),
                                           bool(app.state.get("keep_running", True)))
-        self.behavior_card.grid(row=1, column=0, sticky="ew", padx=(0, T.s(7)))
+        self.behavior_card.grid(row=1, column=0, sticky="ew", padx=(0, T.s(7)), pady=(0, T.s(14)))
         self.about_card = AboutCard(wrap, app.motion, self._open_folder, app.quit)
-        self.about_card.grid(row=1, column=1, sticky="ew", padx=(T.s(7), 0))
+        self.about_card.grid(row=1, column=1, sticky="ew", padx=(T.s(7), 0), pady=(0, T.s(14)))
+        self.notifications_card = NotificationsCard(wrap, app.motion, self._set_notifications,
+                                                    self._set_windows_notifications,
+                                                    self._set_notification_type)
+        self.notifications_card.grid(row=2, column=0, sticky="ew", padx=(0, T.s(7)), pady=(0, T.s(14)))
+        self.protection_card = ProtectionSummaryCard(wrap, app.motion,
+                                                     lambda: self.app.show("protection"))
+        self.protection_card.grid(row=2, column=1, sticky="ew", padx=(T.s(7), 0), pady=(0, T.s(14)))
+        self.storage_card = StorageCard(wrap, app.motion, self._change_location, self._reset_location,
+                                        self._backup, self._open_folder)
+        self.storage_card.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self._wheel_id = None
 
     def on_show(self):
         self._refresh()
-        for card in (self.index_card, self.privacy_card, self.behavior_card, self.about_card):
+        for card in (self.index_card, self.privacy_card, self.behavior_card, self.about_card,
+                     self.notifications_card, self.protection_card, self.storage_card):
             card.enter()
+        self.scroll.canvas.yview_moveto(0)
+        if self._wheel_id is None:
+            try:
+                self._wheel_id = self.winfo_toplevel().bind("<MouseWheel>", self.scroll.wheel, add="+")
+            except tk.TclError:
+                self._wheel_id = None
+
+    def on_hide(self):
+        if self._wheel_id is not None:
+            try:
+                self.winfo_toplevel().unbind("<MouseWheel>", self._wheel_id)
+            except tk.TclError:
+                pass
+            self._wheel_id = None
 
     def _refresh(self):
         try:
@@ -1891,6 +3130,23 @@ class SettingsPage(Page):
         except Exception:
             stats, building = {}, False
         self.index_card.set_stats(stats, building)
+        try:
+            summary = self.app.protection.summary()
+        except Exception:
+            summary = {}
+        self.protection_card.set_summary(summary)
+        try:
+            self.notifications_card.set_settings(self.app.notifications.settings())
+        except Exception:
+            pass
+        size, files = A.storage_usage()
+        self.storage_card.set_info(dict(path=A.APP_DIR, size_text=A.human_size(size), files=files,
+                                        custom=os.path.normcase(os.path.abspath(A.APP_DIR)) !=
+                                        os.path.normcase(os.path.abspath(A.DEFAULT_APP_DIR))))
+        try:
+            self.behavior_card.start_switch.set(self.app.autostart_enabled(), notify=False)
+        except Exception:
+            pass
 
     def on_index_changed(self):
         self._refresh()
@@ -1910,6 +3166,93 @@ class SettingsPage(Page):
         self.app.state.set("keep_running", bool(on))
         self.app.toast("Closing the window keeps ClickScope in the taskbar." if on
                        else "Closing the window will quit ClickScope.", "good")
+
+    # ------------------------------------------------------------ notifications
+    def _set_notifications(self, on):
+        self.app.notifications.set_enabled(on)
+        self.app.toast("Notifications are on." if on else "Notifications are off.", "good")
+
+    def _set_windows_notifications(self, on):
+        self.app.notifications.set_windows(on)
+        self.app.state.set("windows_notifications", bool(on))
+        self.app.toast("Windows notifications are on." if on else "Windows notifications are off.", "good")
+
+    def _set_notification_type(self, key, on):
+        self.app.notifications.set_type(key, on)
+        self.notifications_card.set_settings(self.app.notifications.settings())
+
+    # ------------------------------------------------------------------ storage
+    def _change_location(self):
+        path = filedialog.askdirectory(parent=self, title="Choose a folder for ClickScope data",
+                                       initialdir=os.path.expanduser("~"))
+        if not path:
+            return
+        if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(A.APP_DIR)):
+            self.app.toast("ClickScope already uses that folder.", "warn")
+            return
+        self.app.confirm(
+            "Move ClickScope's data there?",
+            "Settings, protection, Website Memory, notifications and blueprints are copied to the new "
+            "folder. The search index is rebuilt after restart. Nothing is deleted from the current folder.",
+            detail=f"Restart ClickScope to finish moving to {os.path.basename(path) or path}",
+            confirm="Copy data there",
+            on_confirm=lambda: self._relocate(path))
+
+    def _relocate(self, path):
+        def work():
+            return A.relocate_storage(path)
+
+        def done(result):
+            if not result.get("ok"):
+                self.app.toast(result.get("error") or "Could not move the data.", "error")
+                return
+            self.app.toast("Data copied. Restart ClickScope to use the new folder.", "good")
+            self.app.notify("index", "Data location changed",
+                            "Restart ClickScope to finish moving to the new folder.", "settings")
+            self._refresh()
+
+        def failed(e):
+            self.app.toast(f"Could not move the data: {e}", "error")
+
+        self.app.jobs.run(work, on_done=done, on_error=failed)
+
+    def _reset_location(self):
+        if os.path.normcase(os.path.abspath(A.APP_DIR)) == os.path.normcase(os.path.abspath(A.DEFAULT_APP_DIR)):
+            self.app.toast("ClickScope is already using its default folder.", "good")
+            return
+        self.app.confirm(
+            "Use the default folder again?",
+            "ClickScope will store new data in the default Windows app folder after restart. Files already "
+            "copied to the custom folder are left untouched.",
+            confirm="Use default folder",
+            on_confirm=self._reset_location_now)
+
+    def _reset_location_now(self):
+        A.reset_storage_location()
+        self.app.toast("Default folder restored. Restart ClickScope to use it.", "good")
+        self._refresh()
+
+    def _backup(self):
+        path = filedialog.asksaveasfilename(parent=self, title="Back up ClickScope data",
+                                            defaultextension=".zip",
+                                            initialfile="ClickScope-backup.zip",
+                                            filetypes=[("Zip archive", "*.zip"), ("All files", "*.*")])
+        if not path:
+            return
+
+        def work():
+            return A.backup_data(path)
+
+        def done(result):
+            self.app.toast(f"Backup saved \u2014 {result['size_text']}, {result['files']} files.", "good")
+            self.app.notify("index", "Backup saved",
+                            f"{result['files']} files \u00b7 {result['size_text']}.", "settings")
+
+        def failed(e):
+            self.app.toast(f"Could not create the backup: {e}", "error")
+            self.app.notify("errors", "Backup failed", str(e), "settings")
+
+        self.app.jobs.run(work, on_done=done, on_error=failed)
 
     def _open_folder(self):
         A.ensure_dirs()

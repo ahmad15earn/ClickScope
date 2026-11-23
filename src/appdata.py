@@ -11,15 +11,33 @@ import shutil
 import subprocess
 import sys
 import threading
+import zipfile
 
 APP_NAME = "ClickScope"
 VERSION = "2.0"
-APP_DIR = os.environ.get("CLICKSCOPE_HOME") or os.path.join(
-    os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME)
+DEFAULT_APP_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME)
+LOCATION_FILE = os.path.join(DEFAULT_APP_DIR, "location.txt")
+
+
+def _saved_location():
+    """Read the user's chosen storage folder, if it still exists."""
+    try:
+        with open(LOCATION_FILE, encoding="utf-8") as f:
+            path = f.read().strip()
+        if path and os.path.isdir(path):
+            return os.path.abspath(path)
+    except OSError:
+        pass
+    return ""
+
+
+APP_DIR = os.environ.get("CLICKSCOPE_HOME") or _saved_location() or DEFAULT_APP_DIR
 INDEX_PATH = os.path.join(APP_DIR, "index.db")
 STATE_PATH = os.path.join(APP_DIR, "state.json")
 SNAPSHOT_DIR = os.path.join(APP_DIR, "blueprints")
 WALLPAPER_DIR = os.path.join(APP_DIR, "wallpapers")
+DATA_FILES = ("state.json", "websites.json", "protection.json", "notifications.json")
+DATA_DIRS = ("blueprints", "wallpapers")
 
 IS_WINDOWS = sys.platform == "win32"
 NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
@@ -28,6 +46,10 @@ NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
 def ensure_dirs():
     for d in (APP_DIR, SNAPSHOT_DIR, WALLPAPER_DIR):
         os.makedirs(d, exist_ok=True)
+    try:
+        os.makedirs(DEFAULT_APP_DIR, exist_ok=True)
+    except OSError:
+        pass
 
 
 def resource_path(rel):
@@ -99,6 +121,9 @@ class State:
 
     def set_index_roots(self, roots):
         self.set("index_roots", list(dict.fromkeys(roots)))
+
+    def storage_location(self):
+        return self.get("storage_location") or APP_DIR
 
 
 # -------------------------------------------------------------------- helpers
@@ -281,6 +306,242 @@ def drive_info():
         out.append(dict(letter=root[:2], root=root, label=label or "Local disk",
                         total=total, free=free))
     return out
+
+
+def local_drives(include_removable=True):
+    """Local fixed disks, plus USB drives when asked, e.g. ['C:\\\\', 'E:\\\\']."""
+    if not IS_WINDOWS:
+        return []
+    try:
+        k32 = ctypes.windll.kernel32
+        mask = k32.GetLogicalDrives()
+        kinds = {2, 3} if include_removable else {3}  # DRIVE_REMOVABLE, DRIVE_FIXED
+        out = []
+        for i in range(26):
+            if not (mask >> i) & 1:
+                continue
+            root = chr(65 + i) + ":\\"
+            if k32.GetDriveTypeW(ctypes.c_wchar_p(root)) in kinds:
+                out.append(root)
+        return out
+    except Exception:
+        return []
+
+
+# ------------------------------------------------------------ storage & backup
+def _copy_data_tree(src_dir, dst_dir):
+    copied, errors = 0, []
+    for name in DATA_FILES:
+        src = os.path.join(src_dir, name)
+        if os.path.isfile(src):
+            try:
+                os.makedirs(dst_dir, exist_ok=True)
+                shutil.copy2(src, os.path.join(dst_dir, name))
+                copied += 1
+            except OSError as e:
+                errors.append(f"{name}: {e}")
+    for name in DATA_DIRS:
+        src = os.path.join(src_dir, name)
+        if not os.path.isdir(src):
+            continue
+        dst = os.path.join(dst_dir, name)
+        try:
+            if os.path.isdir(dst):
+                for root, _, files in os.walk(src):
+                    rel = os.path.relpath(root, src)
+                    target = dst if rel == "." else os.path.join(dst, rel)
+                    os.makedirs(target, exist_ok=True)
+                    for f in files:
+                        shutil.copy2(os.path.join(root, f), os.path.join(target, f))
+                        copied += 1
+            else:
+                shutil.copytree(src, dst)
+                for root, _, files in os.walk(dst):
+                    copied += len(files)
+        except OSError as e:
+            errors.append(f"{name}: {e}")
+    return copied, errors
+
+
+def relocate_storage(new_dir):
+    """Copy ClickScope's data to another folder and remember it for next launch.
+
+    The search index is intentionally left behind: it only holds file names and
+    is rebuilt in seconds, so copying a live SQLite database is never worth the
+    corruption risk. Nothing in the old folder is deleted.
+    """
+    new_dir = os.path.abspath(os.path.expanduser(new_dir or ""))
+    if not new_dir:
+        return dict(ok=False, error="Choose a folder first.", copied=0)
+    cur = os.path.abspath(APP_DIR)
+    if os.path.normcase(new_dir) == os.path.normcase(cur):
+        return dict(ok=False, error="ClickScope already stores its data there.", copied=0)
+    if os.path.normcase(new_dir).startswith(os.path.normcase(cur) + os.sep):
+        return dict(ok=False, error="Choose a folder outside the current data folder.", copied=0)
+    try:
+        os.makedirs(new_dir, exist_ok=True)
+        probe = os.path.join(new_dir, ".clickscope-write-test")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+    except OSError as e:
+        return dict(ok=False, error=f"That folder is not writable: {e}", copied=0)
+    copied, errors = _copy_data_tree(cur, new_dir)
+    try:
+        os.makedirs(DEFAULT_APP_DIR, exist_ok=True)
+        tmp = LOCATION_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(new_dir)
+        os.replace(tmp, LOCATION_FILE)
+    except OSError as e:
+        return dict(ok=False, error=f"Could not remember the new folder: {e}", copied=copied,
+                    errors=errors)
+    return dict(ok=True, error="", copied=copied, errors=errors, path=new_dir)
+
+
+def reset_storage_location():
+    """Forget the custom folder. Data already copied there is left untouched."""
+    try:
+        if os.path.isfile(LOCATION_FILE):
+            os.remove(LOCATION_FILE)
+        return True
+    except OSError:
+        return False
+
+
+def storage_usage():
+    """(bytes, files) used by ClickScope's own data folder."""
+    total = files = 0
+    for root, _, names in os.walk(APP_DIR):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+                files += 1
+            except OSError:
+                pass
+    return total, files
+
+
+def backup_data(destination):
+    """One zip with settings, protection, websites, notifications and blueprints.
+
+    The search index is excluded on purpose: it is rebuildable and can be large.
+    The zip is verified before it is reported as a success.
+    """
+    destination = os.path.abspath(os.path.expanduser(destination or ""))
+    if not destination:
+        raise ValueError("Choose where to save the backup.")
+    tmp = destination + ".tmp"
+    written = 0
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            manifest = dict(format="clickscope-backup", version=1,
+                            created=datetime.datetime.now().strftime("%d %b %Y, %H:%M"),
+                            app_version=VERSION)
+            z.writestr("backup.json", json.dumps(manifest, indent=2))
+            for name in DATA_FILES:
+                p = os.path.join(APP_DIR, name)
+                if os.path.isfile(p):
+                    z.write(p, name)
+                    written += 1
+            for name in DATA_DIRS:
+                base = os.path.join(APP_DIR, name)
+                if not os.path.isdir(base):
+                    continue
+                for root, _, files in os.walk(base):
+                    for f in files:
+                        p = os.path.join(root, f)
+                        try:
+                            z.write(p, os.path.relpath(p, APP_DIR))
+                            written += 1
+                        except OSError:
+                            pass
+        with zipfile.ZipFile(tmp) as z:
+            if z.testzip() is not None:
+                raise ValueError("The backup did not verify.")
+        os.replace(tmp, destination)
+        return dict(path=destination, files=written, size=os.path.getsize(destination),
+                    size_text=human_size(os.path.getsize(destination)))
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ------------------------------------------------------ notification protocol
+def _protocol_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --open "%1"'
+    exe = sys.executable
+    pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.path.isfile(pythonw):
+        exe = pythonw
+    return f'"{exe}" "{os.path.abspath(sys.argv[0])}" --open "%1"'
+
+
+def ensure_url_protocol():
+    """Register clickscope:// for toast click-through. HKCU only, best effort."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        import winreg
+        base = r"Software\Classes\clickscope"
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, base, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "URL:ClickScope")
+            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command", 0,
+                                winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, _protocol_command())
+        return True
+    except Exception:
+        return False
+
+
+def protocol_installed():
+    if not IS_WINDOWS:
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Classes\clickscope\shell\open\command") as k:
+            winreg.QueryValueEx(k, "")
+        return True
+    except Exception:
+        return False
+
+
+def write_open_request(target):
+    """Ask an already-running ClickScope to switch pages."""
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        path = os.path.join(APP_DIR, "open_request.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(page=target, ts=datetime.datetime.now().timestamp()), f)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def take_open_request():
+    """Return a pending page request once, then remove it."""
+    path = os.path.join(APP_DIR, "open_request.json")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        os.remove(path)
+        return str(data.get("page") or "") if isinstance(data, dict) else ""
+    except (OSError, ValueError):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return ""
 
 
 def recycle_bin(paths):

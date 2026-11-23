@@ -20,6 +20,8 @@ COPY_RE = re.compile(r"\s*\((?:\d+|copy)\)\s*$", re.I)
 DATE_RE = re.compile(r"(?<![a-z0-9])(?:19|20)\d{2}[-_.]?\d{2}[-_.]?\d{2}(?![a-z0-9])")
 WORD_RE = re.compile(r"setup|installer|install|update|download|copy|final|latest", re.I)
 ARCH_RE = re.compile(r"(?<![a-z0-9])(x64|x86|win32|win64|amd64|arm64|64bit|32bit)(?![a-z0-9])", re.I)
+LARGE_BYTES = 100 * 1024 * 1024
+LARGE_DAYS = 365
 
 SYSTEM_TOP = {"windows", "program files", "program files (x86)", "programdata", "$recycle.bin",
               "system volume information", "recovery", "perflogs", "users", "appdata"}
@@ -70,13 +72,22 @@ def normalize_name(name):
     return stem or os.path.splitext(name or "")[0].lower()
 
 
+def version_key(name):
+    """'(2024, 1)' from PhotoStudio_2024.1, so versions beat file timestamps."""
+    m = VERSION_RE.search(name or "")
+    if not m:
+        return ()
+    return tuple(int(p) for p in re.split(r"[._]", m.group(0).lstrip("vV")) if p.isdigit())
+
+
 def _installer_dict(path, size, mtime, now):
     name = os.path.basename(path)
     age_days = max(0, int((now - (mtime or now)) / 86400))
     return dict(path=path, name=name, dir=os.path.dirname(path), ext=os.path.splitext(name)[1].lower(),
                 size=int(size or 0), mtime=int(mtime or 0), age_days=age_days,
                 size_text=human_size(size), age_text=human_age(mtime),
-                norm=normalize_name(name), duplicate_of="", reason="")
+                norm=normalize_name(name), duplicate_of="", reason="", protected=False,
+                large_old=bool(age_days >= LARGE_DAYS and int(size or 0) >= LARGE_BYTES))
 
 
 def _scan_folders(progress=None):
@@ -118,10 +129,12 @@ def _scan_folders(progress=None):
 
 
 def find_installers(index=None, min_age_days=30, now=None, include_recent=False, min_bytes=256 * 1024,
-                    skip_system=True):
-    """Return installers older than min_age_days, with duplicate versions marked.
+                    skip_system=True, protection=None, include_protected=False, stats=None):
+    """Return installers older than min_age_days, with duplicates/old versions marked.
 
     `index` may be a filesearch.FileIndex; its metadata makes this instant.
+    `protection` is a protection.Protection; protected paths never become a
+    cleanup suggestion, and are only listed when include_protected is explicit.
     """
     now = now or time.time()
     rows = []
@@ -135,27 +148,55 @@ def find_installers(index=None, min_age_days=30, now=None, include_recent=False,
         rows = _scan_folders()
 
     items = []
+    protected_skipped = 0
     for path, size, mtime in rows:
         name = os.path.basename(path)
         if not looks_like_installer(name, path, size, min_bytes, skip_system):
             continue
+        if protection is not None:
+            try:
+                if protection.is_protected(path):
+                    protected_skipped += 1
+                    if not include_protected:
+                        continue
+            except Exception:
+                # If protection cannot be checked, the file is not safe to suggest.
+                protected_skipped += 1
+                continue
         it = _installer_dict(path, size, mtime, now)
+        if protection is not None and include_protected:
+            it["protected"] = bool(protection.is_protected(path))
         if not include_recent and it["age_days"] < min_age_days:
             continue
         items.append(it)
 
-    # Mark older copies of the same installer (same name stem, type and folder).
+    # Same name stem, type and folder: mark older copies/versions.
     groups = {}
     for it in items:
         groups.setdefault((it["norm"], it["ext"], it["dir"].lower()), []).append(it)
     for group in groups.values():
         if len(group) < 2:
             continue
-        group.sort(key=lambda x: x["mtime"], reverse=True)
+        group.sort(key=lambda x: (version_key(x["name"]), x["mtime"]), reverse=True)
         newest = group[0]
         for older in group[1:]:
             older["duplicate_of"] = newest["name"]
             older["reason"] = "Older copy"
+
+    # Exact copies in different folders are duplicates too.
+    exact = {}
+    for it in items:
+        if not it["duplicate_of"]:
+            exact.setdefault((it["name"].lower(), it["size"]), []).append(it)
+    for group in exact.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda x: x["mtime"], reverse=True)
+        newest = group[0]
+        for older in group[1:]:
+            older["duplicate_of"] = newest["name"]
+            older["reason"] = "Duplicate copy"
+
     for it in items:
         if not it["reason"]:
             if it["age_days"] >= 365:
@@ -163,23 +204,46 @@ def find_installers(index=None, min_age_days=30, now=None, include_recent=False,
             else:
                 it["reason"] = "Old download"
 
-    items.sort(key=lambda x: (0 if x["duplicate_of"] else 1, -x["age_days"], -x["size"], x["name"].lower()))
+    items.sort(key=lambda x: (0 if x["duplicate_of"] else 1, 0 if x["large_old"] else 1,
+                              -x["age_days"], -x["size"], x["name"].lower()))
+    if stats is not None:
+        stats.update(protected_skipped=protected_skipped,
+                     large_old=sum(1 for i in items if i.get("large_old")))
     return items
 
 
 def summary(items):
     total = sum(i["size"] for i in items)
     return dict(count=len(items), bytes=total, size_text=human_size(total),
-                duplicates=sum(1 for i in items if i["duplicate_of"]))
+                duplicates=sum(1 for i in items if i["duplicate_of"]),
+                large_old=sum(1 for i in items if i.get("large_old")),
+                protected_skipped=sum(1 for i in items if i.get("protected")))
 
 
 def safe_selection(items):
-    """Older duplicate versions plus anything more than a year old."""
-    return [i["path"] for i in items if i["duplicate_of"] or i["age_days"] >= 365]
+    """Older duplicate versions plus anything more than a year old.
+
+    Protected entries are filtered again here: presenting one as a safe pick is
+    already a suggestion, so this is the last line of defence before the UI.
+    """
+    return [i["path"] for i in items
+            if not i.get("protected") and (i["duplicate_of"] or i["age_days"] >= 365)]
 
 
-def remove(paths):
-    """Move installer files to the Recycle Bin. Returns (moved, failed)."""
+def remove(paths, protection=None, blocked=None):
+    """Move installer files to the Recycle Bin. Returns (moved, failed).
+
+    When a protection list is supplied, protected paths are skipped and their
+    names are added to `blocked` so the caller can explain what was kept.
+    """
+    paths = [p for p in paths if p]
+    if protection is not None:
+        allowed, kept = protection.filter_paths(paths)
+        if blocked is not None:
+            blocked.extend(kept)
+        paths = allowed
+    if not paths:
+        return 0, []
     return recycle_bin(list(paths))
 
 

@@ -38,12 +38,35 @@ def _center(root, width, height):
         root.geometry(f"{width}x{height}")
 
 
+def _open_target(argv):
+    """Read --open clickscope:page (or --open=...) from the command line."""
+    for i, arg in enumerate(argv):
+        if arg == "--open" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.lower().startswith("--open="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+def _page_from_target(target):
+    target = str(target or "").strip()
+    if target.lower().startswith("clickscope:"):
+        target = target.split(":", 1)[1]
+    target = target.strip("/ ").lower()
+    known = ("search", "installers", "protection", "websites", "blueprint", "settings")
+    return target if target in known else "search"
+
+
 def main():
     demo = "--demo" in sys.argv
     if demo and "CLICKSCOPE_HOME" not in os.environ:
         os.environ["CLICKSCOPE_HOME"] = os.path.join(tempfile.gettempdir(), "ClickScopeDemo")
     if "--smoke" in sys.argv and "CLICKSCOPE_HOME" not in os.environ:
         os.environ["CLICKSCOPE_HOME"] = os.path.join(tempfile.gettempdir(), "ClickScopeSmoke")
+
+    import appdata as A
+    open_target = _open_target(sys.argv)
+    initial_page = _page_from_target(open_target) if open_target else "search"
 
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
@@ -59,13 +82,17 @@ def main():
             pass
 
     if not _single_instance("Local\\ClickScope2Demo" if demo else "Local\\ClickScope2SingleInstance"):
+        # Already running: hand the page request over and leave quietly. A toast
+        # click should never leave a second window or an extra dialog behind.
+        if open_target:
+            A.write_open_request(initial_page)
+            return
         r = tk.Tk()
         r.withdraw()
         messagebox.showinfo("ClickScope", "ClickScope is already running.\nCheck your taskbar.")
         r.destroy()
         return
 
-    import appdata as A
     import theme as T
     import ui
 
@@ -88,7 +115,13 @@ def main():
         root.destroy()
         return
 
-    app = ui.App(root, state, index)
+    if bool(state.get("windows_notifications", True)):
+        try:
+            A.ensure_url_protocol()
+        except Exception:
+            pass
+
+    app = ui.App(root, state, index, initial_page=initial_page)
     root.deiconify()
     if "--minimized" in sys.argv:
         root.iconify()

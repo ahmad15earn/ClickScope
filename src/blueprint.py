@@ -21,6 +21,61 @@ DNA_FORMAT = "clickscope-dna"
 DNA_VERSION = 1
 BLUEPRINT_SKIP = set(SKIP_DIRS) | {"program files", "program files (x86)"}
 STYLE_NAMES = {"10": "Fill", "6": "Fit", "2": "Stretch", "0": "Center", "22": "Span", "1": "Tile"}
+WALLPAPER_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+MAX_FOLDERS = 200_000
+MAX_IMPORT_BYTES = 300 * 1024 * 1024
+
+
+def validate_snapshot(data):
+    """Reject a corrupt or hostile .clickdna before it can touch the disk."""
+    if not isinstance(data, dict) or data.get("format") != DNA_FORMAT:
+        raise ValueError("This file isn't a ClickScope blueprint.")
+    try:
+        version = int(data.get("version") or 1)
+    except (TypeError, ValueError):
+        version = 0
+    if version < 1 or version > DNA_VERSION:
+        raise ValueError("This blueprint was made by a newer ClickScope.")
+    folders = data.get("folders") or []
+    if not isinstance(folders, list):
+        raise ValueError("The folder list in this blueprint is damaged.")
+    clean = []
+    for raw in folders[:MAX_FOLDERS]:
+        if not isinstance(raw, str):
+            continue
+        p = raw.strip()
+        if not p or len(p) > 1024 or "\x00" in p or not os.path.isabs(p):
+            continue
+        try:
+            clean.append(os.path.normpath(p))
+        except (OSError, ValueError):
+            continue
+    data = dict(data)
+    data["folders"] = list(dict.fromkeys(clean))
+    data["folder_count"] = len(data["folders"])
+    data["kind"] = "wallpaper" if data.get("kind") == "wallpaper" else "snapshot"
+    wp = data.get("wallpaper")
+    if isinstance(wp, dict):
+        name = os.path.basename(str(wp.get("file") or wp.get("name") or "").replace("\\", "/"))
+        ext = os.path.splitext(name)[1].lower()
+        if name and ext in WALLPAPER_EXTS:
+            wp = dict(wp)
+            wp["file"] = name
+            wp["name"] = os.path.basename(str(wp.get("name") or name))
+            style = str(wp.get("style") or "Fill")
+            wp["style"] = style if style in STYLE_NAMES.values() else "Fill"
+            data["wallpaper"] = wp
+        else:
+            data["wallpaper"] = None
+    elif wp is not None:
+        data["wallpaper"] = None
+    drives = data.get("drives")
+    if not isinstance(drives, list):
+        data["drives"] = []
+    data["home"] = str(data.get("home") or "")[:512]
+    data["pc"] = str(data.get("pc") or "This PC")[:80]
+    data["created"] = str(data.get("created") or "")[:80]
+    return data
 
 
 # ------------------------------------------------------------------ wallpaper
@@ -194,10 +249,7 @@ def load_snapshot(record_or_path):
         path = record_or_path.get("data_path") or os.path.join(record_or_path.get("dir", ""), "blueprint.json")
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
-    if data.get("format") != DNA_FORMAT:
-        raise ValueError("This file isn't a ClickScope blueprint.")
-    return data
-
+    return validate_snapshot(data)
 
 def delete_snapshot(record):
     folder = record.get("dir") if isinstance(record, dict) else record
@@ -389,31 +441,43 @@ def import_snapshot(path):
     try:
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as z:
+                names = z.namelist()
+                if any(os.path.isabs(n) or ".." in n.replace("\\", "/").split("/") for n in names):
+                    raise ValueError("That file contains an unsafe path.")
                 try:
-                    raw = z.read("blueprint.json")
+                    info = z.getinfo("blueprint.json")
                 except KeyError:
                     raise ValueError("No blueprint.json inside that file.")
-                data = json.loads(raw.decode("utf-8"))
-                if data.get("format") != DNA_FORMAT:
-                    raise ValueError("This file isn't a ClickScope blueprint.")
+                if info.file_size > 40 * 1024 * 1024:
+                    raise ValueError("The blueprint inside that file is too large.")
+                if sum(i.file_size for i in z.infolist()) > MAX_IMPORT_BYTES:
+                    raise ValueError("That file is too large to be a blueprint.")
+                data = json.loads(z.read(info).decode("utf-8"))
+                data = validate_snapshot(data)
                 with open(os.path.join(folder, "blueprint.json"), "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)
-                for name in z.namelist():
-                    base = os.path.basename(name)
-                    if base.lower().startswith("wallpaper.") and base.lower() != "wallpaper_preview.png":
-                        with z.open(name) as src, open(os.path.join(folder, base), "wb") as dst:
+                wp = data.get("wallpaper") or {}
+                wanted = os.path.basename(str(wp.get("file") or "")).lower()
+                for member in z.infolist():
+                    base = os.path.basename(member.filename)
+                    ext = os.path.splitext(base)[1].lower()
+                    if base.lower() == wanted and ext in WALLPAPER_EXTS:
+                        if member.file_size > 80 * 1024 * 1024:
+                            break
+                        with z.open(member) as src, open(os.path.join(folder, base), "wb") as dst:
                             shutil.copyfileobj(src, dst)
                         break
         else:
+            if os.path.getsize(path) > 40 * 1024 * 1024:
+                raise ValueError("That file is too large to be a blueprint.")
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            if data.get("format") != DNA_FORMAT:
-                raise ValueError("This file isn't a ClickScope blueprint.")
+            data = validate_snapshot(data)
             with open(os.path.join(folder, "blueprint.json"), "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
         wp = data.get("wallpaper") or {}
         if wp.get("file"):
-            p = os.path.join(folder, "wallpaper" + os.path.splitext(wp["file"])[1].lower())
+            p = os.path.join(folder, os.path.basename(wp["file"]))
             if os.path.isfile(p):
                 make_thumbnail(p, os.path.join(folder, "wallpaper_preview.png"))
         meta = _meta_from_data(data)

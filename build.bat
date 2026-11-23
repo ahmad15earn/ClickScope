@@ -7,7 +7,7 @@ if errorlevel 1 (
   echo Python was not found. Install it from https://www.python.org/downloads/ and tick "Add Python to PATH".
   pause & exit /b 1
 )
-python -m pip install --upgrade pyinstaller
+python -m pip install --upgrade pyinstaller pillow
 if errorlevel 1 ( echo Could not install PyInstaller. & pause & exit /b 1 )
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name ClickScope ^
   --icon assets\app.ico --add-data "assets;assets" --paths src src\main.py

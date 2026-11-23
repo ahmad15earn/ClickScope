@@ -1,4 +1,4 @@
-﻿"""ClickScope: a quiet Windows utility built around four everyday jobs.
+"""ClickScope: a quiet Windows utility built around four everyday jobs.
 
 Search finds files instantly, Installers clears old setup files safely,
 Blueprint remembers the shape of the PC, and Settings keeps everything local.
@@ -11,10 +11,13 @@ import threading
 import tkinter as tk
 
 import appdata as A
+import notifications as N
 import pages
+import protection as P
 import theme as T
+import websites as W
 from motion import Motion, clamp, mix, reduced_motion
-from uikit import NavRail, circle, draw_glyph, ellipsize, measure, photo, rr
+from uikit import (NavRail, circle, draw_glyph, ellipsize, measure, photo, rr)
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -159,7 +162,7 @@ class Toast:
             else:
                 c.create_rectangle(0, 0, width, height, fill=T.INK, outline="")
             circle(c, T.s(27), height / 2 - T.s(2), T.s(11), fill=color, outline="")
-            draw_glyph(c, icon, T.s(27), height / 2 - T.s(2), "#FFFFFF", T.s(12), width=T.s(1.8))
+            draw_glyph(c, icon, T.s(27), height / 2 - T.s(2), "#FFFFFF", T.s(13), width=T.s(2.0))
             avail = width - T.s(52) - T.s(20)
             c.create_text(T.s(48), height / 2 - T.s(2), text=ellipsize(text, 9, "bold", avail),
                           font=T.F(9, "bold"), fill="#FFFFFF", anchor="w")
@@ -378,20 +381,190 @@ class ConfirmSheet:
         self.hits = []
 
 
+# --------------------------------------------------------------- notifications
+class NotificationPanel:
+    """A small floating history. Clicking a row opens its section, never a file."""
+
+    TYPE_COLORS = {"index": T.ACCENT, "installers": T.AMBER, "duplicates": T.AMBER,
+                   "protection": T.GREEN, "blueprint": T.VIDEO_INK, "websites": T.ACCENT,
+                   "errors": T.RED}
+    TYPE_ICONS = {"index": "info", "installers": "installers", "duplicates": "installers",
+                  "protection": "protection", "blueprint": "blueprint", "websites": "globe",
+                  "errors": "warning"}
+
+    def __init__(self, app):
+        self.app = app
+        self.top = None
+        self.canvas = None
+        self.rows = []
+        self.clear_box = None
+        self.close_box = None
+
+    def toggle(self):
+        if self.top is not None:
+            self.close()
+        else:
+            self.show()
+
+    def show(self):
+        self.close()
+        items = self.app.notifications.recent(30)
+        self.app.notifications.mark_read()
+        self.app.refresh_unread()
+        width = T.s(392)
+        row_h = T.s(64)
+        height = min(T.s(474), max(T.s(196), T.s(84) + len(items) * row_h + T.s(54)))
+        try:
+            top = tk.Toplevel(self.app.root)
+            top.withdraw()
+            top.overrideredirect(True)
+            top.attributes("-topmost", True)
+            top.configure(bg=T.BG)
+            c = tk.Canvas(top, width=width, height=height, bg=T.BG, highlightthickness=0, bd=0)
+            c.pack()
+            self.top, self.canvas = top, c
+            self._draw(items, width, height, row_h)
+            rx, ry = self.app.root.winfo_rootx(), self.app.root.winfo_rooty()
+            rw = self.app.root.winfo_width()
+            x = rx + rw - width - T.s(14)
+            y = ry + T.s(16)
+            top.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+            c.bind("<ButtonPress-1>", self._click)
+            c.bind("<Motion>", self._move)
+            c.bind("<Leave>", lambda e: c.configure(cursor=""))
+            top.bind("<Escape>", lambda e: self.close())
+            top.deiconify()
+            tk.Misc.tkraise(top)
+            c.focus_set()
+        except tk.TclError:
+            self.close()
+
+    def _draw(self, items, width, height, row_h):
+        c = self.canvas
+        if not c:
+            return
+        c.delete("all")
+        rr(c, 1, 1, width - 1, height - 2, T.s(16), fill=T.CARD, outline=T.LINE2)
+        c.create_text(T.s(20), T.s(24), text="Notifications", font=T.F(13, "bold"), fill=T.TEXT,
+                      anchor="w")
+        c.create_text(T.s(20), T.s(45), text=f"{len(items)} recent  \u00b7  click one to open its section",
+                      font=T.F(8), fill=T.FAINT, anchor="w")
+        self.close_box = (width - T.s(34), T.s(12), width - T.s(12), T.s(34))
+        c.create_line(width - T.s(23), T.s(18), width - T.s(17), T.s(24), fill=T.SUB,
+                      width=T.s(1.5), capstyle="round")
+        c.create_line(width - T.s(17), T.s(18), width - T.s(23), T.s(24), fill=T.SUB,
+                      width=T.s(1.5), capstyle="round")
+        c.create_line(T.s(14), T.s(60), width - T.s(14), T.s(60), fill=T.LINE)
+        self.rows = []
+        if not items:
+            cy = height / 2 - T.s(6)
+            circle(c, width / 2, cy, T.s(22), fill=T.TRACK, outline="")
+            draw_glyph(c, "info", width / 2, cy, T.FAINT, T.s(19), width=T.s(1.8))
+            c.create_text(width / 2, cy + T.s(38), text="Nothing new right now",
+                          font=T.F(11, "bold"), fill=T.TEXT, anchor="center")
+            c.create_text(width / 2, cy + T.s(57),
+                          text="Finished scans, imports and protection changes appear here.",
+                          font=T.F(8), fill=T.SUB, anchor="center")
+            self.clear_box = None
+            return
+        y0 = T.s(66)
+        for i, item in enumerate(items):
+            y = y0 + i * row_h
+            if y + row_h > height - T.s(46):
+                break
+            box = (T.s(8), y, width - T.s(8), y + row_h - T.s(4))
+            self.rows.append((box, item))
+            kind = item.get("type") or "index"
+            col = self.TYPE_COLORS.get(kind, T.ACCENT)
+            circle(c, T.s(28), y + T.s(26), T.s(15), fill=T.TRACK, outline="")
+            draw_glyph(c, self.TYPE_ICONS.get(kind, "info"), T.s(28), y + T.s(26), col,
+                       T.s(14), width=T.s(1.7))
+            title_w = width - T.s(70)
+            c.create_text(T.s(52), y + T.s(15), text=ellipsize(item.get("title", ""), 9, "bold",
+                                                              title_w),
+                          font=T.F(9, "bold"), fill=T.TEXT, anchor="w")
+            body = item.get("body") or ""
+            if body:
+                c.create_text(T.s(52), y + T.s(33), text=ellipsize(body, 8, "normal", title_w),
+                              font=T.F(8), fill=T.SUB, anchor="w")
+            c.create_text(width - T.s(18), y + T.s(14), text=A.human_age(item.get("ts")),
+                          font=T.F(7), fill=T.FAINT, anchor="e")
+            if not item.get("read", True):
+                circle(c, width - T.s(18), y + T.s(32), T.s(3), fill=T.ACCENT, outline="")
+            if i < len(items) - 1:
+                c.create_line(T.s(52), y + row_h - T.s(4), width - T.s(18), y + row_h - T.s(4),
+                              fill=T.LINE)
+        c.create_line(T.s(14), height - T.s(42), width - T.s(14), height - T.s(42), fill=T.LINE)
+        self.clear_box = (width - T.s(96), height - T.s(36), width - T.s(14), height - T.s(8))
+        c.create_text(width - T.s(20), height - T.s(22), text="Clear history",
+                      font=T.F(8, "bold"), fill=T.SUB, anchor="e")
+
+    def _row_at(self, x, y):
+        for box, item in self.rows:
+            x1, y1, x2, y2 = box
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return item
+        return None
+
+    def _hit(self, box, x, y):
+        return bool(box) and box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+    def _move(self, e):
+        hot = bool(self._row_at(e.x, e.y)) or self._hit(self.clear_box, e.x, e.y) or \
+            self._hit(self.close_box, e.x, e.y)
+        self.canvas.configure(cursor="hand2" if hot else "")
+
+    def _click(self, e):
+        if self._hit(self.close_box, e.x, e.y):
+            self.close()
+            return
+        if self._hit(self.clear_box, e.x, e.y):
+            self.app.notifications.clear()
+            self.app.refresh_unread()
+            self.close()
+            self.app.toast("Notification history cleared.", "good")
+            return
+        item = self._row_at(e.x, e.y)
+        if item:
+            self.app.open_notification(item)
+
+    def close(self):
+        if self.top is not None:
+            try:
+                self.top.destroy()
+            except tk.TclError:
+                pass
+        self.top, self.canvas = None, None
+        self.rows = []
+        self.clear_box = self.close_box = None
+
+
 # ----------------------------------------------------------------------- app
 class App:
-    def __init__(self, root, state, index, on_quit=None):
+    def __init__(self, root, state, index, on_quit=None, initial_page=None):
         self.root, self.state, self.index = root, state, index
         self.on_quit_cb = on_quit
         self._closing = False
         self._watcher_started = False
         self._watch_after = None
+        self._open_poll = None
         self.current = None
         A.ensure_dirs()
         self.motion = Motion(root, enabled=not reduced_motion())
         self.jobs = Jobs(root)
         self.toast = Toast(root)
         self.sheet = ConfirmSheet(self)
+        try:
+            self.protection = P.Protection()
+        except Exception:
+            self.protection = P.Protection(path=os.path.join(A.APP_DIR, "protection.json"))
+        try:
+            self.websites = W.WebsiteMemory()
+        except Exception:
+            self.websites = W.WebsiteMemory(path=os.path.join(A.APP_DIR, "websites.json"))
+        self.notifications = N.Notifications(windows=bool(state.get("windows_notifications", True)))
+        self.notifications.on_new = self._notification_event
+        self.notification_panel = NotificationPanel(self)
 
         root.title("ClickScope")
         root.configure(bg=T.BG)
@@ -405,7 +578,8 @@ class App:
             self.logo = tk.PhotoImage(file=A.resource_path("assets/logo_40.png"))
         except tk.TclError:
             pass
-        self.sidebar = NavRail(root, self.motion, self.show, logo=self.logo)
+        self.sidebar = NavRail(root, self.motion, self.show, logo=self.logo,
+                               on_notify=self.toggle_notifications)
         self.sidebar.configure(width=T.s(224))
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
@@ -414,24 +588,29 @@ class App:
 
         self.search = pages.SearchPage(self.main, self)
         self.installers = pages.InstallersPage(self.main, self)
+        self.protection_page = pages.ProtectionPage(self.main, self)
+        self.websites_page = pages.WebsitesPage(self.main, self)
         self.blueprint = pages.BlueprintPage(self.main, self)
         self.settings = pages.SettingsPage(self.main, self)
         self.pages = {"search": self.search, "installers": self.installers,
+                      "protection": self.protection_page, "websites": self.websites_page,
                       "blueprint": self.blueprint, "settings": self.settings}
         for page in self.pages.values():
             page.place(x=0, y=0, relwidth=1, relheight=1)
 
-        self.show("search")
+        self.show(initial_page if initial_page in self.pages else "search")
         self._bind_keys()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(80, self.refresh_status)
         root.after(650, self.start_watcher)
+        self._poll_open_request()
 
     # ---------------------------------------------------------------- chrome
     def _bind_keys(self):
         self.root.bind_all("<Control-k>", self._key_search)
         self.root.bind_all("<Control-K>", self._key_search)
-        for i, key in enumerate(("search", "installers", "blueprint", "settings"), start=1):
+        order = ("search", "installers", "protection", "websites", "blueprint", "settings")
+        for i, key in enumerate(order, start=1):
             self.root.bind_all(f"<Control-Key-{i}>", lambda e, k=key: self.show(k))
         self.root.bind_all("<Control-q>", lambda e: self.quit())
 
@@ -444,6 +623,12 @@ class App:
         page = self.pages.get(key)
         if page is None or self._closing:
             return
+        if self.current and self.current != key:
+            try:
+                self.pages[self.current].on_hide()
+            except Exception:
+                pass
+        self.notification_panel.close()
         for p in self.pages.values():
             p.lower()
         tk.Misc.tkraise(page)
@@ -453,6 +638,82 @@ class App:
             page.on_show()
         except Exception:
             pass
+
+    # ----------------------------------------------------------- notifications
+    def notify(self, ntype, title, body="", target=""):
+        """Record a notification and show a Windows toast when allowed."""
+        if self._closing:
+            return None
+        if threading.current_thread() is not threading.main_thread():
+            self.jobs.post(lambda: self.notify(ntype, title, body, target))
+            return None
+        try:
+            item = self.notifications.emit(ntype, title, body, target)
+        except Exception:
+            item = None
+        self.refresh_unread()
+        return item
+
+    def _notification_event(self, item):
+        if threading.current_thread() is not threading.main_thread():
+            self.jobs.post(self.refresh_unread)
+        else:
+            self.refresh_unread()
+
+    def refresh_unread(self):
+        if self._closing:
+            return
+        try:
+            self.sidebar.set_unread(self.notifications.unread_count())
+        except Exception:
+            pass
+
+    def toggle_notifications(self):
+        if self._closing:
+            return
+        self.notification_panel.toggle()
+
+    def open_notification(self, item):
+        self.notification_panel.close()
+        try:
+            self.notifications.mark_read(item.get("id"))
+        except Exception:
+            pass
+        self.refresh_unread()
+        target = str(item.get("target") or "search")
+        self.open_target(target)
+
+    def open_target(self, target):
+        target = str(target or "").strip()
+        if target.lower().startswith("clickscope:"):
+            target = target.split(":", 1)[1]
+        target = target.strip("/ ").lower()
+        if target in ("notifications", "bell"):
+            self.toggle_notifications()
+            return
+        if target not in self.pages:
+            target = "search"
+        self.show(target)
+        try:
+            self.root.deiconify()
+            self.root.lift()
+        except tk.TclError:
+            pass
+
+    def _poll_open_request(self):
+        self._open_poll = None
+        if self._closing:
+            return
+        try:
+            target = A.take_open_request()
+            if target:
+                self.open_target(target)
+        except Exception:
+            pass
+        try:
+            self._open_poll = self.root.after(900, self._poll_open_request)
+        except tk.TclError:
+            self._open_poll = None
 
     # ----------------------------------------------------------------- state
     def refresh_status(self):
@@ -472,6 +733,7 @@ class App:
             title, sub, color = "Not indexed", "One scan makes search instant", T.AMBER
         if getattr(self.sidebar, "status", None) != (title, sub, color):
             self.sidebar.set_status(title, sub, color)
+        self.refresh_unread()
 
     def post(self, fn):
         self.jobs.post(fn)
@@ -512,6 +774,10 @@ class App:
             self.installers.on_index_changed()
         elif self.current == "settings":
             self.settings.on_index_changed()
+        elif self.current == "protection":
+            self.protection_page.refresh()
+        elif self.current == "websites":
+            self.websites_page.refresh()
 
     # --------------------------------------------------------------- actions
     def rebuild_index(self):
@@ -539,6 +805,8 @@ class App:
             self.settings.on_index_changed()
             self.refresh_status()
             self.toast("Search index removed. Your files were not touched.", "good")
+            self.notify("index", "Search index removed",
+                        "Your files were not touched. Build the index again whenever you like.", "search")
 
         self.confirm(
             "Remove the search index?",
@@ -565,6 +833,9 @@ class App:
             return
         self._closing = True
         try:
+            self.notification_panel.close()
+            if self._open_poll is not None:
+                self.root.after_cancel(self._open_poll)
             self.jobs.close()
             self.toast.close()
             self.sheet.close()

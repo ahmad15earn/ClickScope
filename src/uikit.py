@@ -117,11 +117,26 @@ def circle(c, cx, cy, r, **kw):
 
 
 def tint_fill(kind):
-    return {"doc": (T.DOC_FILL, T.DOC_INK), "image": (T.IMAGE_FILL, T.IMAGE_INK),
+    return {"doc": (T.DOC_FILL, T.DOC_INK), "pdf": (T.PDF_FILL, T.PDF_INK),
+            "image": (T.IMAGE_FILL, T.IMAGE_INK),
             "video": (T.VIDEO_FILL, T.VIDEO_INK), "audio": (T.AUDIO_FILL, T.AUDIO_INK),
             "archive": (T.ARCHIVE_FILL, T.ARCHIVE_INK), "app": (T.APP_FILL, T.APP_INK),
             "code": (T.CODE_FILL, T.CODE_INK), "folder": (T.FOLDER_FILL, T.FOLDER_INK),
             "other": (T.OTHER_FILL, T.OTHER_INK)}.get(kind, (T.OTHER_FILL, T.OTHER_INK))
+
+
+def file_color_kind(name, kind="other", is_dir=False):
+    """Files get a colour by type; folders and EXE/MSI tiles keep their own look."""
+    if is_dir or kind == "folder":
+        return "folder"
+    if kind == "app":
+        return "app"
+    ext = os.path.splitext(name or "")[1].lower()
+    if ext == ".pdf":
+        return "pdf"
+    if ext in (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".iso", ".cab", ".tgz", ".zst"):
+        return "archive"
+    return kind or "other"
 
 
 # ---------------------------------------------------------------------- icons
@@ -222,6 +237,22 @@ def draw_glyph(c, kind, cx, cy, col, sz, width=None):
         circle(c, cx + h * 0.45, cy + h * 0.24, max(1, w * 0.7), fill=col, outline="")
         c.create_line(cx - h * 0.55, cy + h * 0.24, cx + h * 0.05, cy + h * 0.24, fill=col, width=w,
                       capstyle="round")
+    elif kind == "protection":  # shield
+        c.create_line(cx - h * 0.7, cy - h * 0.55, cx, cy - h * 0.85, cx + h * 0.7, cy - h * 0.55,
+                      fill=col, width=w, joinstyle="round", capstyle="round")
+        c.create_line(cx - h * 0.7, cy - h * 0.55, cx - h * 0.62, cy + h * 0.12, cx, cy + h * 0.8,
+                      cx + h * 0.62, cy + h * 0.12, cx + h * 0.7, cy - h * 0.55, fill=col, width=w,
+                      joinstyle="round", capstyle="round")
+        c.create_line(cx - h * 0.28, cy + h * 0.05, cx - h * 0.05, cy + h * 0.3, cx + h * 0.34,
+                      cy - h * 0.22, fill=col, width=w, joinstyle="round", capstyle="round")
+    elif kind == "globe":
+        circle(c, cx, cy, h * 0.8, outline=col, width=w)
+        c.create_oval(cx - h * 0.36, cy - h * 0.8, cx + h * 0.36, cy + h * 0.8, outline=col, width=w)
+        c.create_line(cx - h * 0.8, cy, cx + h * 0.8, cy, fill=col, width=w, capstyle="round")
+        c.create_line(cx - h * 0.68, cy - h * 0.4, cx + h * 0.68, cy - h * 0.4, fill=col, width=w,
+                      capstyle="round")
+        c.create_line(cx - h * 0.68, cy + h * 0.4, cx + h * 0.68, cy + h * 0.4, fill=col, width=w,
+                      capstyle="round")
     else:  # page
         rr(c, cx - h * 0.52, cy - h * 0.72, cx + h * 0.52, cy + h * 0.72, T.s(3), outline=col, width=w)
         c.create_line(cx - h * 0.25, cy - h * 0.25, cx + h * 0.25, cy - h * 0.25, fill=col, width=w,
@@ -235,11 +266,20 @@ ICON_DIR = "assets/icons"
 _icon_cache = {}
 _icon_missing = set()
 
-FILE_ICONS = {"doc": "document", "image": "image", "video": "video", "audio": "audio",
-              "archive": "archive", "app": "app", "code": "code", "folder": "folder",
-              "other": "document"}
+FILE_ICONS = {"doc": "document", "pdf": "document", "image": "image", "video": "video",
+              "audio": "audio", "archive": "archive", "app": "app", "code": "code",
+              "folder": "folder", "other": "document"}
 GLYPH_FALLBACK = {"import": "plus", "document": "folder", "image": "folder", "video": "folder",
                   "audio": "folder", "archive": "folder", "app": "folder", "code": "folder"}
+
+
+def _quantize(color):
+    """Snap a hex colour to 16-step channels so spring-driven tints reuse one cache entry."""
+    try:
+        return "#%02x%02x%02x" % tuple(min(255, int(c) // 16 * 16 + 8) for c in
+                                       (int(color[i:i + 2], 16) for i in (1, 3, 5)))
+    except Exception:
+        return color
 
 
 def icon_photo(name, size, color):
@@ -250,6 +290,7 @@ def icon_photo(name, size, color):
     install Pillow so the icon pack is always the one people see.
     """
     size = max(8, int(round(size)))
+    color = _quantize(color)
     key = (name, size, color)
     if key in _icon_cache:
         return _icon_cache[key]
@@ -545,11 +586,15 @@ class IconButton(tk.Canvas):
 # ------------------------------------------------------------------ nav rail
 class NavRail(tk.Canvas):
     ITEMS = [("search", "Search", "search"), ("installers", "Installers", "installers"),
+             ("protection", "Protection", "protection"), ("websites", "Websites", "globe"),
              ("blueprint", "Blueprint", "blueprint"), ("settings", "Settings", "settings")]
 
-    def __init__(self, parent, motion, on_select, logo=None):
+    def __init__(self, parent, motion, on_select, logo=None, on_notify=None):
         super().__init__(parent, bg=T.SIDEBAR, highlightthickness=0, bd=0)
         self.motion, self.on_select, self.logo = motion, on_select, logo
+        self.on_notify = on_notify
+        self.unread = 0
+        self.bell_hover = False
         self.active, self.hover = 0, -1
         self.W = self.H = 0
         self.pill = Spring(motion, self, 0.0, response=0.34, damping=1.0)
@@ -576,6 +621,9 @@ class NavRail(tk.Canvas):
         i = (y - self._top()) // self._pitch()
         return int(i) if 0 <= i < len(self.ITEMS) else -1
 
+    def _bell_at(self, x, y):
+        return self.W - T.s(46) <= x <= self.W - T.s(10) and T.s(18) <= y <= T.s(62)
+
     def _set_hover(self, i):
         if i != self.hover:
             self.hover = i
@@ -583,14 +631,29 @@ class NavRail(tk.Canvas):
             self.redraw()
 
     def _move(self, e):
-        self._set_hover(self._index_at(e.x, e.y))
+        bell = self._bell_at(e.x, e.y)
+        if bell != self.bell_hover:
+            self.bell_hover = bell
+            self.redraw()
+        self._set_hover(-1 if bell else self._index_at(e.x, e.y))
 
     def _press(self, e):
+        if self._bell_at(e.x, e.y):
+            if self.on_notify:
+                self.on_notify()
+            return
         i = self._index_at(e.x, e.y)
         if i >= 0:
             self.select(self.ITEMS[i][0])
         elif e.y > self.H - T.s(70) and e.y < self.H - T.s(20):
             self.on_select("settings")
+
+    def set_unread(self, count):
+        count = max(0, int(count or 0))
+        if count == self.unread:
+            return
+        self.unread = count
+        self.redraw()
 
     def select(self, key, notify=True):
         try:
@@ -617,9 +680,31 @@ class NavRail(tk.Canvas):
             tx = T.s(22) + self.logo.width() + T.s(11)
         else:
             rr(self, T.s(22), T.s(24), T.s(54), T.s(56), T.s(9), fill=T.ACCENT, outline="")
-            draw_glyph(self, "search", T.s(38), T.s(40), "#FFFFFF", T.s(16), width=T.s(2))
+            draw_icon(self, "search", T.s(38), T.s(40), T.s(19), "#FFFFFF")
             tx = T.s(66)
         self.create_text(tx, T.s(40), text="ClickScope", font=T.F(14, "bold"), fill=T.TEXT, anchor="w")
+        # notification bell, top right of the rail
+        bx, by = W - T.s(28), T.s(40)
+        if self.bell_hover:
+            circle(self, bx, by, T.s(15), fill=T.SIDEBAR_HOVER, outline="")
+        bcol = T.TEXT if (self.bell_hover or self.unread) else T.SUB
+        self.create_arc(bx - T.s(8), by - T.s(10), bx + T.s(8), by + T.s(5), start=0, extent=180,
+                        style="arc", outline=bcol, width=T.s(1.8))
+        self.create_line(bx - T.s(8), by - T.s(3), bx - T.s(8), by + T.s(4), fill=bcol, width=T.s(1.8),
+                         capstyle="round")
+        self.create_line(bx + T.s(8), by - T.s(3), bx + T.s(8), by + T.s(4), fill=bcol, width=T.s(1.8),
+                         capstyle="round")
+        self.create_line(bx - T.s(10), by + T.s(4), bx + T.s(10), by + T.s(4), fill=bcol, width=T.s(1.8),
+                         capstyle="round")
+        circle(self, bx, by + T.s(7), T.s(1.9), fill=bcol, outline="")
+        if self.unread:
+            bx2, by2 = bx + T.s(8), by - T.s(10)
+            circle(self, bx2, by2, T.s(5.5), fill=T.RED, outline=T.SIDEBAR, width=T.s(1.4))
+            if self.unread > 9:
+                self.create_text(bx2, by2, text="9+", font=T.F(6, "bold"), fill="#FFFFFF", anchor="center")
+            else:
+                self.create_text(bx2, by2, text=str(self.unread), font=T.F(7, "bold"), fill="#FFFFFF",
+                                 anchor="center")
 
         top, pitch = self._top(), self._pitch()
         py = top + self.pill.value * pitch
@@ -849,6 +934,65 @@ class Chips(tk.Canvas):
                              font=T.F(9, "bold" if on else "normal"), fill=fg, anchor="center")
 
 
+# ------------------------------------------------------------------ chip menu
+class ChipButton(tk.Canvas):
+    """A small pill that opens a menu, styled like the filter chips."""
+
+    def __init__(self, parent, motion, text, command, bg=T.BG, active=False, h=None, width=None):
+        self.motion = motion
+        self.text_value = text
+        self.command = command
+        self.active = bool(active)
+        self.bgc = bg
+        self.h = h or T.s(28)
+        self.w = width or (measure(text, 9, "bold") + T.s(44))
+        super().__init__(parent, width=self.w, height=self.h, bg=bg, highlightthickness=0, bd=0,
+                         cursor="hand2", takefocus=1)
+        self.hover = Spring(motion, self, 0.0, response=0.2)
+        self.press = Spring(motion, self, 0.0, response=0.13)
+        self.bind("<Enter>", lambda e: self.hover.to(1))
+        self.bind("<Leave>", lambda e: (self.hover.to(0), self.press.to(0)))
+        self.bind("<ButtonPress-1>", lambda e: self.press.to(1))
+        self.bind("<ButtonRelease-1>", self._up)
+        self.bind("<Return>", lambda e: self.command and self.command())
+        self.bind("<space>", lambda e: self.command and self.command())
+        self.redraw()
+
+    def _up(self, e):
+        self.press.to(0)
+        if 0 <= e.x <= self.w and self.command:
+            self.command()
+
+    def set_text(self, text, active=None):
+        if active is not None:
+            self.active = bool(active)
+        self.text_value = text
+        self.w = measure(text, 9, "bold") + T.s(44)
+        self.configure(width=self.w)
+        self.redraw()
+
+    def set_active(self, active):
+        self.active = bool(active)
+        self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        if self.active:
+            fill, fg, border = T.INK, "#FFFFFF", T.INK
+        elif self.hover.value > 0.01:
+            fill, fg, border = T.TRACK, T.TEXT, ""
+        else:
+            fill, fg, border = "", T.SUB, T.LINE2
+        rr(self, 1, 1, self.w - 1, self.h - 1, T.s(13), fill=fill, outline=border,
+           width=T.s(1))
+        tx = T.s(13)
+        self.create_text(tx, self.h / 2, text=ellipsize(self.text_value, 9, "bold", self.w - T.s(34)),
+                         font=T.F(9, "bold" if self.active else "normal"), fill=fg, anchor="w")
+        cx, cy = self.w - T.s(14), self.h / 2
+        self.create_line(cx - T.s(3.5), cy - T.s(2), cx, cy + T.s(1.8), cx + T.s(3.5), cy - T.s(2),
+                         fill=fg, width=T.s(1.4), capstyle="round", joinstyle="round")
+
+
 # --------------------------------------------------------------- results view
 class ResultsView(Card):
     ROW = 62
@@ -958,7 +1102,7 @@ class ResultsView(Card):
             self.create_line(T.s(20), T.s(self.HEAD), cardw - T.s(20), T.s(self.HEAD), fill=T.LINE)
             cy = T.s(self.HEAD) + max(T.s(60), (self.H - T.s(self.HEAD)) * 0.34)
             circle(self, cardw / 2, cy, T.s(22), fill=T.TRACK, outline="")
-            draw_glyph(self, "search", cardw / 2, cy, T.FAINT, T.s(19), width=T.s(1.9))
+            draw_icon(self, "search", cardw / 2, cy, T.s(21), T.FAINT)
             self.create_text(cardw / 2, cy + T.s(42), text="Nothing matches that yet",
                              font=T.F(13, "bold"), fill=T.TEXT, anchor="center")
             q = ellipsize(self.query, 9, "normal", min(T.s(420), cardw - T.s(80)))
@@ -982,7 +1126,8 @@ class ResultsView(Card):
                    outline="")
             elif i == self.hover:
                 rr(self, T.s(8), y + 3, cardw - T.s(8), y + row - 3, T.s(10), fill=T.HOVER, outline="")
-            draw_file_icon(self, r.get("kind", "other"), T.s(20), y + T.s(12), T.s(38))
+            draw_file_icon(self, file_color_kind(r.get("name"), r.get("kind", "other"),
+                                                 bool(r.get("is_dir"))), T.s(20), y + T.s(12), T.s(38))
             name_x = T.s(70)
             meta_w = T.s(132)
             self._draw_name(name_x, y + T.s(11), r, cardw - name_x - meta_w - T.s(26))
@@ -992,6 +1137,9 @@ class ResultsView(Card):
                              font=T.F(9), fill=T.SUB, anchor="w")
             meta = "Folder" if r.get("is_dir") else r.get("size_text") or format_size(r.get("size", 0))
             age = r.get("age_text") or ""
+            if r.get("protected"):
+                draw_glyph(self, "protection", cardw - T.s(146), y + T.s(35), T.ACCENT_D, T.s(11),
+                           width=T.s(1.5))
             self.create_text(cardw - T.s(22), y + T.s(15), text=meta, font=T.F(9, "bold"),
                              fill=T.SUB if i == self.selected else T.FAINT, anchor="e")
             self.create_text(cardw - T.s(22), y + T.s(35), text=age, font=T.F(9), fill=T.FAINT, anchor="e")
