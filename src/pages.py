@@ -2086,7 +2086,7 @@ class ProtectionCard(Card):
         if not self.entries:
             cx, cy = self.W / 2, self.H * 0.40
             circle(self, cx, cy, T.s(27), fill=T.ACCENT_SOFT, outline="")
-            draw_glyph(self, "protection", cx, cy, T.ACCENT_D, T.s(24), width=T.s(2.0))
+            draw_icon(self, "protection", cx, cy, T.s(24), T.ACCENT_D)
             self.create_text(cx, cy + T.s(46), text="Nothing is protected yet",
                              font=T.F(13, "bold"), fill=T.TEXT, anchor="center")
             self.create_text(cx, cy + T.s(68),
@@ -2124,7 +2124,7 @@ class ProtectionCard(Card):
             elif i == self.hover:
                 rr(self, T.s(8), y + 3, self.W - T.s(8), y + row - 3, T.s(10), fill=T.HOVER, outline="")
             rr(self, T.s(20), y + T.s(13), T.s(56), y + T.s(49), T.s(10), fill=T.ACCENT_SOFT, outline="")
-            draw_glyph(self, "protection", T.s(38), y + T.s(31), T.ACCENT_D, T.s(18), width=T.s(1.7))
+            draw_icon(self, "protection", T.s(38), y + T.s(31), T.s(18), T.ACCENT_D)
             name_x = T.s(68)
             avail = self.W - name_x - meta_w - T.s(28)
             self.create_text(name_x, y + T.s(14), text=ellipsize(entry.get("name", ""), 10, "bold", avail),

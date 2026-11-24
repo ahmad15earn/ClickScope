@@ -1138,8 +1138,7 @@ class ResultsView(Card):
             meta = "Folder" if r.get("is_dir") else r.get("size_text") or format_size(r.get("size", 0))
             age = r.get("age_text") or ""
             if r.get("protected"):
-                draw_glyph(self, "protection", cardw - T.s(146), y + T.s(35), T.ACCENT_D, T.s(11),
-                           width=T.s(1.5))
+                draw_icon(self, "protection", cardw - T.s(146), y + T.s(35), T.s(11), T.ACCENT_D)
             self.create_text(cardw - T.s(22), y + T.s(15), text=meta, font=T.F(9, "bold"),
                              fill=T.SUB if i == self.selected else T.FAINT, anchor="e")
             self.create_text(cardw - T.s(22), y + T.s(35), text=age, font=T.F(9), fill=T.FAINT, anchor="e")

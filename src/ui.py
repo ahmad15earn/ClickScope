@@ -17,7 +17,7 @@ import protection as P
 import theme as T
 import websites as W
 from motion import Motion, clamp, mix, reduced_motion
-from uikit import (NavRail, circle, draw_glyph, ellipsize, measure, photo, rr)
+from uikit import (NavRail, circle, draw_glyph, draw_icon, ellipsize, measure, photo, rr)
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -480,8 +480,7 @@ class NotificationPanel:
             kind = item.get("type") or "index"
             col = self.TYPE_COLORS.get(kind, T.ACCENT)
             circle(c, T.s(28), y + T.s(26), T.s(15), fill=T.TRACK, outline="")
-            draw_glyph(c, self.TYPE_ICONS.get(kind, "info"), T.s(28), y + T.s(26), col,
-                       T.s(14), width=T.s(1.7))
+            draw_icon(c, self.TYPE_ICONS.get(kind, "info"), T.s(28), y + T.s(26), T.s(14), col)
             title_w = width - T.s(70)
             c.create_text(T.s(52), y + T.s(15), text=ellipsize(item.get("title", ""), 9, "bold",
                                                               title_w),
