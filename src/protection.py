@@ -246,8 +246,6 @@ class Protection:
                     pass
                 self.entries[path_key(match)] = updated
                 changed.append(updated)
-            if index is None:
-                break
         if changed:
             with self.lock:
                 self._write()
@@ -257,22 +255,48 @@ class Protection:
         name = old.get("name") or ""
         if not name:
             return ""
+        want_dir = old.get("kind") == "folder"
         candidates = []
         if index is not None:
             try:
                 candidates = index.find_by_name(name, limit=40)
             except Exception:
                 candidates = []
+            if not want_dir:
+                # A rename changes the name, so look for the fingerprint too.
+                finder = getattr(index, "find_by_fingerprint", None)
+                if finder is not None:
+                    try:
+                        candidates = list(candidates) + list(
+                            finder(old.get("size") or 0, old.get("mtime") or 0))
+                    except Exception:
+                        pass
         else:
-            # No index: look only in the old folder and on the desktop, never
-            # walk a whole drive just to move a marker.
+            # No index: look in the old folder and on the desktop. Compare size
+            # and modified time instead of walking a whole drive.
             folders = [os.path.dirname(old["path"]),
                        os.path.join(os.path.expanduser("~"), "Desktop")]
             for folder in folders:
-                p = os.path.join(folder, name)
-                if os.path.exists(p):
-                    candidates.append(dict(path=p, is_dir=os.path.isdir(p)))
-        want_dir = old.get("kind") == "folder"
+                try:
+                    entries = list(os.scandir(folder))
+                except OSError:
+                    continue
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False) != want_dir:
+                            continue
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if want_dir:
+                        if entry.name.lower() != name.lower():
+                            continue
+                    else:
+                        if int(st.st_size) != int(old.get("size") or 0):
+                            continue
+                        if abs(int(st.st_mtime) - int(old.get("mtime") or 0)) > 8:
+                            continue
+                    candidates.append(dict(path=entry.path, is_dir=want_dir))
         exact = []
         for row in candidates:
             path = row.get("path") or ""

@@ -581,7 +581,7 @@ class SearchPage(Page):
         for label, col in reversed(LEGEND):
             w = measure(label, 7, "bold")
             x -= w + T.s(14)
-            c.create_text(x + T.s(14), T.s(14), text=label, font=T.F(7, "bold"), fill=T.SUB, anchor="e")
+            c.create_text(x + T.s(14), T.s(14), text=label, font=T.F(7, "bold"), fill=T.SUB, anchor="w")
             circle(c, x + T.s(5), T.s(14), T.s(3.2), fill=col, outline="")
             x -= T.s(8)
 

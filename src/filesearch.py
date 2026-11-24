@@ -278,7 +278,10 @@ class FileIndex:
         for root in missing:
             self._delete_prefix(root)
         added = [r for r in present if r in previous_offline]
-        self._set_meta("offline_roots", json.dumps(missing))
+        # Keep reconnected roots marked until a scan confirms their contents;
+        # otherwise a reconnect during another background scan would be lost.
+        pending_offline = list(dict.fromkeys(missing + added))
+        self._set_meta("offline_roots", json.dumps(pending_offline))
         if missing or added:
             self._invalidate()
         return dict(missing=missing, added=added, present=present)
@@ -317,20 +320,22 @@ class FileIndex:
         self._stats_cache = (0.0, None)
 
     # ------------------------------------------------------------------- build
-    def build_async(self, roots=None, on_done=None):
+    def build_async(self, roots=None, on_done=None, reset=True, preserve_roots=False):
         if self._building:
             return False
         self._stop = threading.Event()
         self._building = True
-        self._thread = threading.Thread(target=self._build_worker, args=(roots, on_done), daemon=True,
+        self._thread = threading.Thread(target=self._build_worker,
+                                        args=(roots, on_done, reset, preserve_roots), daemon=True,
                                         name="ClickScopeIndex")
         self._thread.start()
         return True
 
-    def _build_worker(self, roots, on_done):
+    def _build_worker(self, roots, on_done, reset=True, preserve_roots=False):
         ok = False
         try:
-            ok = self.build(roots=roots, stop_event=self._stop)
+            ok = self.build(roots=roots, reset=reset, preserve_roots=preserve_roots,
+                            stop_event=self._stop)
         except Exception as e:  # never take the app down because one folder refused to read
             with self.lock:
                 self._progress.update(state="partial", error=str(e), done=time.time())
@@ -343,17 +348,26 @@ class FileIndex:
         except Exception:
             pass
 
-    def build(self, roots=None, reset=True, stop_event=None, progress_cb=None):
-        """Synchronous full scan. roots defaults to every local drive."""
+    def build(self, roots=None, reset=True, stop_event=None, progress_cb=None, preserve_roots=False):
+        """Synchronous full scan. roots defaults to every local drive.
+
+        ``preserve_roots`` keeps the existing index and adds only the requested
+        roots. It is used when a previously offline drive comes back.
+        """
         self._invalidate()
         requested = [r for r in (roots or self.default_roots()) if r]
-        roots = [os.path.abspath(r) for r in requested if os.path.isdir(r)]
+        requested = list(dict.fromkeys(os.path.abspath(r) for r in requested))
+        roots = [r for r in requested if os.path.isdir(r)]
         stop = stop_event or threading.Event()
         if reset:
             self._reset_index()
-        self._set_meta("known_roots", json.dumps(list(dict.fromkeys(os.path.abspath(r) for r in requested))))
-        self._set_meta("offline_roots", json.dumps([os.path.abspath(r) for r in requested
-                                                    if not os.path.isdir(r)]))
+        if preserve_roots:
+            known = list(dict.fromkeys(self._known_roots() + requested))
+        else:
+            known = requested
+        self._set_meta("known_roots", json.dumps(known))
+        missing = [r for r in known if not os.path.isdir(r)]
+        self._set_meta("offline_roots", json.dumps(missing))
         with self.lock:
             self._progress.update(state="scanning", files=0, dirs=0, current="", started=time.time(),
                                   done=0.0, error="", total_estimate=0)
@@ -446,7 +460,10 @@ class FileIndex:
             self._progress.update(state=state, done=time.time(), current="")
         self._set_meta("state", state)
         self._set_meta("last_build", int(time.time()))
-        self._set_meta("roots", json.dumps(roots))
+        if preserve_roots:
+            self._set_meta("roots", json.dumps([r for r in known if os.path.isdir(r)]))
+        else:
+            self._set_meta("roots", json.dumps(roots))
         self._invalidate()
         return not cancelled
 
@@ -619,6 +636,25 @@ class FileIndex:
             rows = self.db.execute(
                 "SELECT path,name,dir,ext,size,mtime,kind,is_dir FROM files WHERE name_lower=? "
                 "ORDER BY is_dir DESC, mtime DESC LIMIT ?", ((name or "").lower(), int(limit))).fetchall()
+        return self._rows_to_dicts(rows)
+
+    def find_by_fingerprint(self, size, mtime, tolerance=8, limit=40):
+        """Same size and a near-identical modified time, regardless of name.
+
+        Used only to re-attach a protection marker after a rename, and only when
+        exactly one file matches. Two matches are treated as no match at all.
+        """
+        try:
+            size, mtime, tolerance = int(size), int(mtime), max(0, int(tolerance))
+        except (TypeError, ValueError):
+            return []
+        if size <= 0 or mtime <= 0:
+            return []
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT path,name,dir,ext,size,mtime,kind,is_dir FROM files "
+                "WHERE is_dir=0 AND size=? AND mtime BETWEEN ? AND ? LIMIT ?",
+                (size, mtime - tolerance, mtime + tolerance, int(limit))).fetchall()
         return self._rows_to_dicts(rows)
 
     def search(self, query, kind=None, limit=120, scope=None, min_size=None, max_size=None,

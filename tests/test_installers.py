@@ -73,15 +73,20 @@ def test_find_duplicates_and_safe_picks():
     assert older["reason"] == "Older copy"
     assert newest["reason"] == "Older than a year"
     assert older["age_text"] and older["size_text"]
+    game = next(i for i in items if i["name"] == "OldGameSetup.exe")
+    assert game["large_old"] is True, game
+    assert newest["large_old"] is True, newest
+    assert older["large_old"] is True, older
 
     safe = set(I.safe_selection(items))
     assert older["path"] in safe and newest["path"] in safe
-    assert next(i for i in items if i["name"] == "OldGameSetup.exe")["path"] in safe
+    assert game["path"] in safe
 
     summary = I.summary(items)
     assert summary["count"] == len(items)
     assert summary["bytes"] == sum(i["size"] for i in items)
     assert summary["duplicates"] == 1
+    assert summary["large_old"] >= 2, summary
 
     recent_only = I.find_installers(index=FakeIndex(rows), now=NOW, min_age_days=750, min_bytes=0,
                                     skip_system=False)
@@ -100,9 +105,64 @@ def test_remove_uses_recycle_bin():
     assert seen == [r"C:\Users\Alex\Downloads\Old.exe"]
 
 
+class FakeProtection:
+    def __init__(self, protected):
+        self.protected = {p.lower() for p in protected}
+
+    def is_protected(self, path):
+        return (path or "").lower() in self.protected
+
+    def filter_paths(self, paths):
+        allowed, blocked = [], []
+        for p in paths:
+            (blocked if self.is_protected(p) else allowed).append(p)
+        return allowed, blocked
+
+
+def test_protection_filters_suggestions():
+    rows = [
+        row(r"C:\Users\Alex\Downloads\KeepThisSetup.exe", 40_000_000, 800),
+        row(r"C:\Users\Alex\Downloads\OldSetup.exe", 2_000_000, 500),
+    ]
+    protection = FakeProtection([r"C:\Users\Alex\Downloads\KeepThisSetup.exe"])
+    stats = {}
+    items = I.find_installers(index=FakeIndex(rows), now=NOW, min_age_days=30, min_bytes=0,
+                              skip_system=False, protection=protection, stats=stats)
+    names = [i["name"] for i in items]
+    assert "KeepThisSetup.exe" not in names, names
+    assert "OldSetup.exe" in names, names
+    assert stats["protected_skipped"] == 1, stats
+    assert I.safe_selection(items) == [r"C:\Users\Alex\Downloads\OldSetup.exe"]
+
+    listed = I.find_installers(index=FakeIndex(rows), now=NOW, min_age_days=30, min_bytes=0,
+                               skip_system=False, protection=protection, include_protected=True)
+    keep = next(i for i in listed if i["name"] == "KeepThisSetup.exe")
+    assert keep["protected"] is True
+    assert keep["path"] not in I.safe_selection(listed)
+
+
+def test_remove_skips_protected_paths():
+    seen = []
+    original = I.recycle_bin
+    I.recycle_bin = lambda paths: (seen.extend(paths) or len(paths), [])
+    try:
+        blocked = []
+        protection = FakeProtection([r"C:\Users\Alex\Downloads\Keep.exe"])
+        moved, failed = I.remove([r"C:\Users\Alex\Downloads\Keep.exe",
+                                  r"C:\Users\Alex\Downloads\Old.exe"], protection=protection,
+                                 blocked=blocked)
+    finally:
+        I.recycle_bin = original
+    assert moved == 1 and failed == []
+    assert seen == [r"C:\Users\Alex\Downloads\Old.exe"]
+    assert blocked == [r"C:\Users\Alex\Downloads\Keep.exe"]
+
+
 if __name__ == "__main__":
     test_name_heuristics()
     test_normalize_name()
     test_find_duplicates_and_safe_picks()
     test_remove_uses_recycle_bin()
+    test_protection_filters_suggestions()
+    test_remove_skips_protected_paths()
     print("installers tests OK")

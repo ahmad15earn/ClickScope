@@ -428,9 +428,13 @@ def backup_data(destination):
     The search index is excluded on purpose: it is rebuildable and can be large.
     The zip is verified before it is reported as a success.
     """
-    destination = os.path.abspath(os.path.expanduser(destination or ""))
-    if not destination:
+    if not destination or not str(destination).strip():
         raise ValueError("Choose where to save the backup.")
+    destination = os.path.abspath(os.path.expanduser(destination))
+    if os.path.isdir(destination):
+        raise ValueError("Choose a file name for the backup, not a folder.")
+    if not destination.lower().endswith(".zip"):
+        destination += ".zip"
     tmp = destination + ".tmp"
     written = 0
     try:

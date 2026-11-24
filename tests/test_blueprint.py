@@ -144,10 +144,52 @@ def test_stats_text():
         "1 folder  \u00b7  1 drive"
 
 
+def test_hostile_import_is_rejected():
+    import zipfile
+    original_snapshots = B.SNAPSHOT_DIR
+    root = tempfile.mkdtemp(prefix="clickscope-dna-hostile-")
+    B.SNAPSHOT_DIR = os.path.join(root, "blueprints")
+    os.makedirs(B.SNAPSHOT_DIR)
+    try:
+        data = make_data(r"C:\Users\Alex", [r"C:\Users\Alex"])
+        evil = os.path.join(root, "evil.clickdna")
+        with zipfile.ZipFile(evil, "w") as z:
+            z.writestr("blueprint.json", json.dumps(data))
+            z.writestr("../escape.txt", "should never be written")
+        try:
+            B.import_snapshot(evil)
+            raise AssertionError("a path-traversal zip must be rejected")
+        except ValueError:
+            pass
+        assert not os.path.exists(os.path.join(root, "escape.txt"))
+        assert B.list_snapshots() == [], "a rejected import must not leave a snapshot behind"
+
+        newer = make_data(r"C:\Users\Alex", [r"C:\Users\Alex"])
+        newer["version"] = B.DNA_VERSION + 5
+        future = os.path.join(root, "future.clickdna")
+        with zipfile.ZipFile(future, "w") as z:
+            z.writestr("blueprint.json", json.dumps(newer))
+        try:
+            B.import_snapshot(future)
+            raise AssertionError("a newer blueprint format must be rejected")
+        except ValueError:
+            pass
+
+        broken = make_data(r"C:\Users\Alex", [r"C:\Users\Alex"])
+        broken["wallpaper"] = dict(file="../../bad.png", name="bad.png", style="Fill")
+        cleaned = B.validate_snapshot(broken)
+        assert cleaned["wallpaper"]["file"] == "bad.png"
+        assert cleaned["wallpaper"]["style"] == "Fill"
+    finally:
+        B.SNAPSHOT_DIR = original_snapshots
+        shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_folder_mapping()
     test_plan_and_restore_creates_only_folders()
     test_export_import_and_delete()
     test_invalid_import_leaves_no_folder()
     test_stats_text()
+    test_hostile_import_is_rejected()
     print("blueprint tests OK")

@@ -127,6 +127,9 @@ class Toast:
         self._alpha = 1.0
         self._transparent = True
 
+    def __call__(self, text, tone="good"):
+        self.show(text, tone)
+
     def show(self, text, tone="good"):
         if self.root.state() == "iconic":
             return
@@ -547,6 +550,7 @@ class App:
         self._closing = False
         self._watcher_started = False
         self._watch_after = None
+        self._drive_after = None
         self._open_poll = None
         self.current = None
         A.ensure_dirs()
@@ -603,6 +607,7 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(80, self.refresh_status)
         root.after(650, self.start_watcher)
+        root.after(1200, self._sync_drives)
         self._poll_open_request()
 
     # ---------------------------------------------------------------- chrome
@@ -779,6 +784,55 @@ class App:
         elif self.current == "websites":
             self.websites_page.refresh()
 
+    # ---------------------------------------------------------- external drives
+    def _schedule_drive_check(self):
+        if self._closing:
+            return
+        if self._drive_after is not None:
+            try:
+                self.root.after_cancel(self._drive_after)
+            except Exception:
+                pass
+        self._drive_after = self.root.after(45000, self._sync_drives)
+
+    def _sync_drives(self):
+        """Notice unplugged and reconnected drives without a full manual rescan."""
+        self._drive_after = None
+        if self._closing:
+            return
+        try:
+            result = self.index.sync_roots()
+        except Exception:
+            result = {}
+        if self._closing:
+            return
+        if result.get("missing"):
+            self._watch_apply()
+        added = [r for r in (result.get("added") or []) if os.path.isdir(r)]
+        if added and not self.index.is_building():
+            names = ", ".join(os.path.basename(r.rstrip("\\/")) or r for r in added[:3])
+            self.notify("index", "Drive connected",
+                        f"{names} is back. Adding its files to the index.", "search")
+            self.toast(f"Indexing {names} again.", "info")
+            self.index.build_async(roots=added, reset=False, preserve_roots=True,
+                                   on_done=lambda ok, st: self.post(
+                                       lambda: self._drives_indexed(ok, st)))
+        self._schedule_drive_check()
+
+    def _drives_indexed(self, ok, stats):
+        if self._closing:
+            return
+        self.refresh_status()
+        if self.current == "search":
+            self.search.on_index_changed()
+        elif self.current == "installers":
+            self.installers.on_index_changed()
+        elif self.current == "settings":
+            self.settings.on_index_changed()
+        if ok:
+            self.notify("index", "External drive indexed",
+                        f"{stats.get('files', 0):,} files are searchable again.", "search")
+
     # --------------------------------------------------------------- actions
     def rebuild_index(self):
         self.show("search")
@@ -836,6 +890,9 @@ class App:
             self.notification_panel.close()
             if self._open_poll is not None:
                 self.root.after_cancel(self._open_poll)
+            if self._drive_after is not None:
+                self.root.after_cancel(self._drive_after)
+                self._drive_after = None
             self.jobs.close()
             self.toast.close()
             self.sheet.close()
