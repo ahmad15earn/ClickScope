@@ -11,9 +11,12 @@ import threading
 import tkinter as tk
 
 import appdata as A
+import apps as APPS
+import hotkey as HK
 import notifications as N
 import pages
 import protection as P
+import quickbar as QB
 import theme as T
 import websites as W
 from motion import Motion, clamp, mix, reduced_motion
@@ -601,6 +604,19 @@ class App:
         for page in self.pages.values():
             page.place(x=0, y=0, relwidth=1, relheight=1)
 
+        # Universal Search: a local Start Menu list and one global shortcut.
+        self.apps = None
+        try:
+            self.apps = APPS.AppIndex()
+            self.apps.start_refresh()
+        except Exception:
+            self.apps = None
+        self.quick = QB.QuickBar(self)
+        self.hotkey = HK.GlobalHotkey(lambda: self.jobs.post(self.quick.toggle))
+        self._hotkey_suspended = False
+        self._hotkey_error = ""
+        self._register_quick_hotkey()
+
         self.show(initial_page if initial_page in self.pages else "search")
         self._bind_keys()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -874,6 +890,93 @@ class App:
     def autostart_enabled(self):
         return autostart_enabled()
 
+    # --------------------------------------------------------- universal search
+    def _register_quick_hotkey(self):
+        self._hotkey_error = ""
+        try:
+            self.hotkey.stop()
+        except Exception:
+            pass
+        if self._hotkey_suspended or self._closing:
+            return ""
+        if not bool(self.state.get("quick_search", True)):
+            return ""
+        if os.environ.get("CLICKSCOPE_NO_HOTKEY"):
+            return ""
+        spec = str(self.state.get("quick_shortcut") or HK.DEFAULT_SHORTCUT)
+        ok, error = self.hotkey.start(spec)
+        if not ok:
+            self._hotkey_error = error
+            return error
+        return ""
+
+    def quick_settings(self):
+        return dict(enabled=bool(self.state.get("quick_search", True)),
+                    shortcut=str(self.state.get("quick_shortcut") or HK.DEFAULT_SHORTCUT),
+                    error=self._hotkey_error)
+
+    def set_quick_enabled(self, on):
+        if on:
+            self.state.set("quick_search", True)
+            error = self._register_quick_hotkey()
+            if error:
+                self.state.set("quick_search", False)
+                self._register_quick_hotkey()
+                return error
+            return ""
+        self.state.set("quick_search", False)
+        try:
+            self.hotkey.stop()
+        except Exception:
+            pass
+        self._hotkey_error = ""
+        return ""
+
+    def set_quick_shortcut(self, spec):
+        try:
+            canon = HK.normalize_shortcut(spec)
+        except ValueError as e:
+            return str(e)
+        previous = str(self.state.get("quick_shortcut") or HK.DEFAULT_SHORTCUT)
+        guarded = bool(os.environ.get("CLICKSCOPE_NO_HOTKEY"))
+        enabled = bool(self.state.get("quick_search", True))
+        if guarded:
+            self.state.set("quick_shortcut", canon)
+            return ""
+        if self._hotkey_suspended or not enabled:
+            # The real registration is paused (settings dialog or feature off).
+            # Test the combination once so a taken shortcut is reported now.
+            probe = HK.GlobalHotkey()
+            ok, error = probe.start(canon)
+            probe.stop()
+            if not ok:
+                return error
+            self.state.set("quick_shortcut", canon)
+            return ""
+        ok, error = self.hotkey.start(canon)
+        if not ok:
+            # Keep the working shortcut alive when the new one is taken.
+            try:
+                self.hotkey.start(previous)
+            except Exception:
+                pass
+            self._hotkey_error = error
+            return error
+        self.state.set("quick_shortcut", canon)
+        self._hotkey_error = ""
+        return ""
+
+    def suspend_quick_hotkey(self):
+        self._hotkey_suspended = True
+        try:
+            self.hotkey.stop()
+        except Exception:
+            pass
+
+    def resume_quick_hotkey(self):
+        self._hotkey_suspended = False
+        return self._register_quick_hotkey()
+
     # ----------------------------------------------------------------- close
     def on_close(self):
         if bool(self.state.get("keep_running", True)):
@@ -895,6 +998,8 @@ class App:
             self.jobs.close()
             self.toast.close()
             self.sheet.close()
+            self.hotkey.stop()
+            self.quick.close()
             self.index.close()
         except Exception:
             pass

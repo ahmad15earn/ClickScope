@@ -8,6 +8,7 @@ from tkinter import filedialog
 
 import appdata as A
 import blueprint as B
+import hotkey as HK
 import installers as I
 import notifications as N
 import protection as P
@@ -2430,7 +2431,7 @@ class WebsitesCard(Card):
         if not self.items:
             cx, cy = self.W / 2, self.H * 0.38
             circle(self, cx, cy, T.s(27), fill=T.ACCENT_SOFT, outline="")
-            draw_glyph(self, "globe", cx, cy, T.ACCENT_D, T.s(26), width=T.s(1.8))
+            draw_icon(self, "globe", cx, cy, T.s(26), T.ACCENT_D)
             self.create_text(cx, cy + T.s(46), text="No websites remembered yet",
                              font=T.F(13, "bold"), fill=T.TEXT, anchor="center")
             self.create_text(cx, cy + T.s(68),
@@ -2468,7 +2469,7 @@ class WebsitesCard(Card):
                        outline="")
                 rr(self, T.s(20), y + T.s(14), T.s(56), y + T.s(50), T.s(10), fill=T.ACCENT_SOFT,
                    outline="")
-                draw_glyph(self, "globe", T.s(38), y + T.s(32), T.ACCENT_D, T.s(19), width=T.s(1.4))
+                draw_icon(self, "globe", T.s(38), y + T.s(32), T.s(19), T.ACCENT_D)
                 cat = item.get("category") or W.DEFAULT_CATEGORY
                 badge_w = min(T.s(120), measure(cat, 8, "bold") + T.s(20))
                 bx1 = self.W - T.s(24) - badge_w
@@ -3073,6 +3074,214 @@ class StorageCard(Card):
                              font=T.F(8), fill=T.FAINT, anchor="w")
 
 
+class ShortcutDialog(tk.Toplevel):
+    """Capture one key combination for the global Universal Search shortcut."""
+
+    MODIFIER_KEYS = {"Control_L", "Control_R", "Alt_L", "Alt_R", "Shift_L", "Shift_R",
+                     "Win_L", "Win_R", "Super_L", "Super_R", "Meta_L", "Meta_R",
+                     "Caps_Lock", "Num_Lock"}
+
+    def __init__(self, parent, motion, current, on_save, on_close=None):
+        super().__init__(parent)
+        self.on_save = on_save
+        self.on_close = on_close
+        self.captured = current or HK.DEFAULT_SHORTCUT
+        self.held = set()
+        self._closed = False
+        self.title("Universal search shortcut")
+        self.configure(bg=T.BG)
+        self.resizable(False, False)
+        self.transient(parent.winfo_toplevel())
+        body = tk.Frame(self, bg=T.BG, padx=T.s(26), pady=T.s(22))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Set a global shortcut", font=T.F(16, "bold"), fg=T.TEXT, bg=T.BG,
+                 anchor="w").pack(fill="x")
+        tk.Label(body, text="Press the keys you want to use. Include Ctrl, Alt or Win.",
+                 font=T.F(9), fg=T.SUB, bg=T.BG, anchor="w").pack(fill="x", pady=(T.s(3), T.s(16)))
+        self.preview = tk.Label(body, text=HK.pretty_shortcut(self.captured), font=T.F(15, "bold"),
+                                fg=T.TEXT, bg=T.CARD, anchor="center", padx=T.s(18), pady=T.s(14),
+                                highlightthickness=1, highlightbackground=T.LINE2)
+        self.preview.pack(fill="x")
+        self.error = tk.Label(body, text="", font=T.F(8, "bold"), fg=T.RED, bg=T.BG, anchor="w",
+                              wraplength=T.s(400), justify="left")
+        self.error.pack(fill="x", pady=(T.s(9), 0))
+        tk.Label(body, text="Letters, numbers, Space, F1\u2013F24 and arrow keys work. "
+                            "Escape cancels.", font=T.F(8), fg=T.FAINT, bg=T.BG, anchor="w",
+                 wraplength=T.s(400), justify="left").pack(fill="x", pady=(T.s(6), 0))
+        row = tk.Frame(body, bg=T.BG)
+        row.pack(fill="x", pady=(T.s(18), 0))
+        Button(row, motion, "Use default", self._default, style="quiet", bg=T.BG, h=T.s(36),
+               size=9).pack(side="left")
+        Button(row, motion, "Save shortcut", self._save, style="primary", bg=T.BG, h=T.s(36),
+               size=9).pack(side="right")
+        Button(row, motion, "Cancel", self._close, style="quiet", bg=T.BG, h=T.s(36),
+               size=9).pack(side="right", padx=(0, T.s(8)))
+        self.bind("<KeyPress>", self._pressed)
+        self.bind("<KeyRelease>", self._released)
+        self.bind("<Escape>", lambda e: self._close())
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.update_idletasks()
+        try:
+            root = parent.winfo_toplevel()
+            w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+            x = root.winfo_rootx() + (root.winfo_width() - w) // 2
+            y = root.winfo_rooty() + (root.winfo_height() - h) // 2
+            self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except tk.TclError:
+            pass
+        self.grab_set()
+        self.focus_force()
+
+    def _mods(self, event):
+        names = []
+        state = int(getattr(event, "state", 0) or 0)
+        if state & 0x0004 or "Control_L" in self.held or "Control_R" in self.held:
+            names.append("Ctrl")
+        if state & 0x0001 or "Shift_L" in self.held or "Shift_R" in self.held:
+            names.append("Shift")
+        if (state & 0x20000) or (state & 0x0008) or "Alt_L" in self.held or "Alt_R" in self.held:
+            names.append("Alt")
+        if any(k in self.held for k in ("Win_L", "Win_R", "Super_L", "Super_R")):
+            names.append("Win")
+        order = ("Ctrl", "Alt", "Shift", "Win")
+        return [n for n in order if n in names]
+
+    def _key_name(self, event):
+        ks = getattr(event, "keysym", "") or ""
+        if len(ks) == 1 and ks.isalnum():
+            return ks.upper()
+        table = {"space": "Space", "Return": "Enter", "KP_Enter": "Enter", "Tab": "Tab",
+                 "BackSpace": "Backspace", "Delete": "Delete", "Insert": "Insert",
+                 "Home": "Home", "End": "End", "Prior": "PageUp", "Next": "PageDown",
+                 "Left": "Left", "Right": "Right", "Up": "Up", "Down": "Down"}
+        if ks in table:
+            return table[ks]
+        if len(ks) >= 2 and ks[0] == "F" and ks[1:].isdigit() and 1 <= int(ks[1:]) <= 24:
+            return ks
+        return ""
+
+    def _show_mods(self):
+        names = [n for n in ("Ctrl", "Alt", "Shift", "Win") if n in getattr(self, "_pending", [])]
+        text = " + ".join(names + ["\u2026"]) if names else "Press a combination\u2026"
+        self.preview.configure(text=text, fg=T.SUB)
+
+    def _pressed(self, event):
+        ks = getattr(event, "keysym", "") or ""
+        self._pending = getattr(self, "_pending", [])
+        if ks in self.MODIFIER_KEYS:
+            self.held.add(ks)
+            self._pending = self._mods(event)
+            self._show_mods()
+            return "break"
+        key = self._key_name(event)
+        mods = self._mods(event)
+        self._pending = mods
+        if not key:
+            self.error.configure(text="That key can't be used here. Try a letter, number, Space "
+                                       "or an F-key.")
+            return "break"
+        spec = "+".join(mods + [key]) if mods else key
+        try:
+            canon = HK.normalize_shortcut(spec)
+        except ValueError as e:
+            self.error.configure(text=str(e))
+            return "break"
+        self.captured = canon
+        self.error.configure(text="")
+        self.preview.configure(text=HK.pretty_shortcut(canon), fg=T.TEXT)
+        return "break"
+
+    def _released(self, event):
+        ks = getattr(event, "keysym", "") or ""
+        if ks in self.MODIFIER_KEYS:
+            self.held.discard(ks)
+            self._pending = self._mods(event)
+            self._show_mods()
+        return "break"
+
+    def _default(self):
+        self.captured = HK.DEFAULT_SHORTCUT
+        self.error.configure(text="")
+        self.preview.configure(text=HK.pretty_shortcut(self.captured), fg=T.TEXT)
+
+    def _save(self):
+        try:
+            error = self.on_save(self.captured)
+        except Exception as e:
+            error = str(e) or "Could not use that shortcut."
+        if error:
+            self.error.configure(text=error)
+            return
+        self._close()
+
+    def _close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+        if self.on_close:
+            try:
+                self.on_close()
+            except Exception:
+                pass
+
+
+class UniversalSearchCard(Card):
+    """Settings card for the floating search bar and its global shortcut."""
+
+    def __init__(self, parent, motion, on_enabled, on_shortcut):
+        super().__init__(parent, motion, bg=T.BG, radius=18, height=T.s(168))
+        self.motion = motion
+        self.info = {}
+        self.switch = Switch(self, motion, True, command=on_enabled, bg=T.CARD)
+        self.key_btn = Button(self, motion, HK.pretty_shortcut(HK.DEFAULT_SHORTCUT), on_shortcut,
+                              style="secondary", bg=T.CARD, h=T.s(34), size=9)
+        self.reveal.jump(1.0)
+        self.redraw()
+
+    def set_settings(self, info):
+        self.info = dict(info or {})
+        self.switch.set(bool(self.info.get("enabled", True)), notify=False)
+        self.key_btn.set_text(HK.pretty_shortcut(self.info.get("shortcut") or HK.DEFAULT_SHORTCUT))
+        self.redraw()
+
+    def redraw(self):
+        super().redraw()
+        if self.W >= 10:
+            self.switch.place(x=self.W - T.s(22) - self.switch.winfo_reqwidth(), y=T.s(12))
+            self.key_btn.place(x=T.s(22), y=self.H - T.s(52))
+
+    def draw(self):
+        if self.W < 10:
+            return
+        pad = T.s(22)
+        enabled = bool(self.info.get("enabled", True))
+        error = str(self.info.get("error") or "")
+        self.create_text(pad, T.s(21), text="Universal search", font=T.F(11, "bold"), fill=T.TEXT,
+                         anchor="w")
+        self.create_text(pad, T.s(46),
+                         text="A floating bar over any app \u2014 files, folders and Start Menu apps.",
+                         font=T.F(9), fill=T.SUB, anchor="w")
+        self.create_text(pad, T.s(65),
+                         text="Shown only when you press your shortcut. Searches stay on this PC.",
+                         font=T.F(8), fill=T.FAINT, anchor="w")
+        self.create_line(T.s(18), T.s(86), self.W - T.s(18), T.s(86), fill=T.LINE)
+        self.create_text(pad, T.s(101), text="GLOBAL SHORTCUT", font=T.F(8, "bold"), fill=T.FAINT,
+                         anchor="w")
+        status_x = self.W - T.s(22) - self.switch.winfo_reqwidth() - T.s(8)
+        self.create_text(status_x, T.s(27), text="On" if enabled else "Off", font=T.F(8, "bold"),
+                         fill=T.GREEN if enabled else T.FAINT, anchor="e")
+        hint_w = max(T.s(120), self.W - T.s(290))
+        hint = error or ("Press it anywhere in Windows while ClickScope is running." if enabled
+                         else "Turn this on to use the shortcut.")
+        self.create_text(self.W - pad, T.s(132), text=ellipsize(hint, 8, "normal", hint_w),
+                         font=T.F(8), fill=T.RED if error else T.FAINT, anchor="e")
+
+
 class SettingsPage(Page):
     def __init__(self, parent, app):
         super().__init__(parent, app, "Settings", "A few choices, and everything stays on this PC.")
@@ -3100,13 +3309,16 @@ class SettingsPage(Page):
         self.protection_card.grid(row=2, column=1, sticky="ew", padx=(T.s(7), 0), pady=(0, T.s(14)))
         self.storage_card = StorageCard(wrap, app.motion, self._change_location, self._reset_location,
                                         self._backup, self._open_folder)
-        self.storage_card.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.quick_card = UniversalSearchCard(wrap, app.motion, self._set_quick, self._change_shortcut)
+        self.quick_card.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, T.s(14)))
+        self.storage_card.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.shortcut_dialog = None
         self._wheel_id = None
 
     def on_show(self):
         self._refresh()
         for card in (self.index_card, self.privacy_card, self.behavior_card, self.about_card,
-                     self.notifications_card, self.protection_card, self.storage_card):
+                     self.notifications_card, self.protection_card, self.quick_card, self.storage_card):
             card.enter()
         self.scroll.canvas.yview_moveto(0)
         if self._wheel_id is None:
@@ -3147,6 +3359,10 @@ class SettingsPage(Page):
             self.behavior_card.start_switch.set(self.app.autostart_enabled(), notify=False)
         except Exception:
             pass
+        try:
+            self.quick_card.set_settings(self.app.quick_settings())
+        except Exception:
+            pass
 
     def on_index_changed(self):
         self._refresh()
@@ -3180,6 +3396,48 @@ class SettingsPage(Page):
     def _set_notification_type(self, key, on):
         self.app.notifications.set_type(key, on)
         self.notifications_card.set_settings(self.app.notifications.settings())
+
+    # ---------------------------------------------------------- universal search
+    def _set_quick(self, on):
+        error = self.app.set_quick_enabled(on)
+        self.quick_card.set_settings(self.app.quick_settings())
+        if error:
+            self.app.toast(error, "warn")
+            return
+        if on:
+            shortcut = self.app.quick_settings().get("shortcut") or HK.DEFAULT_SHORTCUT
+            self.app.toast("Universal search is on. Press " + HK.pretty_shortcut(shortcut) +
+                           " anywhere.", "good")
+        else:
+            self.app.toast("Universal search is off.", "info")
+
+    def _change_shortcut(self):
+        if self.shortcut_dialog is not None:
+            try:
+                self.shortcut_dialog.lift()
+            except tk.TclError:
+                pass
+            return
+        self.app.suspend_quick_hotkey()
+        self.shortcut_dialog = ShortcutDialog(
+            self, self.app.motion,
+            self.app.quick_settings().get("shortcut") or HK.DEFAULT_SHORTCUT,
+            self._save_shortcut, on_close=self._shortcut_closed)
+
+    def _save_shortcut(self, spec):
+        error = self.app.set_quick_shortcut(spec)
+        if error:
+            return error
+        self.quick_card.set_settings(self.app.quick_settings())
+        self.app.toast("Universal search shortcut: " + HK.pretty_shortcut(spec), "good")
+        return ""
+
+    def _shortcut_closed(self):
+        self.shortcut_dialog = None
+        error = self.app.resume_quick_hotkey()
+        self.quick_card.set_settings(self.app.quick_settings())
+        if error:
+            self.app.toast(error, "warn")
 
     # ------------------------------------------------------------------ storage
     def _change_location(self):

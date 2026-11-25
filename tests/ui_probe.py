@@ -21,6 +21,7 @@ for d in (home, user):
 for sub in ("Desktop", "Downloads", "Documents", "Pictures", "Music", "Videos"):
     os.makedirs(os.path.join(user, sub), exist_ok=True)
 os.environ["CLICKSCOPE_HOME"] = home
+os.environ["CLICKSCOPE_NO_HOTKEY"] = "1"
 os.environ["USERPROFILE"] = user
 os.environ["HOMEDRIVE"], os.environ["HOMEPATH"] = os.path.splitdrive(user)
 os.environ["OneDrive"] = ""
@@ -105,6 +106,48 @@ def main():
         app.search._set_date("old")
         app.search._set_scope("any")
         root.update()
+
+        # Universal search: the floating bar queries the local index and responds.
+        app.quick.show()
+        root.update()
+        assert app.quick.top is not None and app.quick.top.winfo_viewable(), \
+            "the universal search bar did not show"
+        app.quick.var.set("report")
+        app.quick._changed()
+        deadline = time.time() + 6
+        while not app.quick.results and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+        root.update()
+        assert app.quick.results, "universal search returned no rows"
+        assert any(r.get("name") == "probe-report.pdf" for r in app.quick.results), \
+            app.quick.results[:3]
+        app.quick._move(1)
+        app.quick.hide()
+        root.update()
+        assert not app.quick._visible, "universal search bar did not hide"
+
+        # Universal search settings: shortcut validation and the capture dialog.
+        app.show("settings")
+        root.update()
+        assert app.set_quick_shortcut("Ctrl+Alt+Shift+F13") == "", "valid shortcut rejected"
+        assert app.state.get("quick_shortcut") == "Ctrl+Alt+Shift+F13"
+        assert app.set_quick_shortcut("Ctrl") != "", "invalid shortcut accepted"
+        app.settings._change_shortcut()
+        root.update()
+        shortcut_dlg = app.settings.shortcut_dialog
+        assert shortcut_dlg is not None, "shortcut dialog did not open"
+
+        class _Key:
+            keysym = "k"
+            state = 0x0005
+
+        shortcut_dlg._pressed(_Key())
+        assert shortcut_dlg.captured == "Ctrl+Shift+K", shortcut_dlg.captured
+        shortcut_dlg._save()
+        root.update()
+        assert app.state.get("quick_shortcut") == "Ctrl+Shift+K", "captured shortcut was not saved"
+        assert app.settings.shortcut_dialog is None, "shortcut dialog did not close"
 
         # Installers, blueprint and settings pages.
         app.show("installers")

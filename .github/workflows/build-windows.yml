@@ -21,6 +21,8 @@ jobs:
           python tests/test_websites.py
           python tests/test_notifications.py
           python tests/test_appdata.py
+          python tests/test_hotkey.py
+          python tests/test_apps.py
           python tests/test_no_network.py
       - run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name ClickScope --icon assets/app.ico --add-data "assets;assets" --paths src src/main.py
       - name: Build installer (folder-choosing setup wizard)

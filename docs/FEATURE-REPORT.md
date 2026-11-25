@@ -1,7 +1,7 @@
 # ClickScope 2.0 — Feature Audit Report
 
-Date: 24 November 2026  
-Build audited: portable `dist\ClickScope.exe` (33.1 MB) and `installer_output\ClickScope-Setup.exe` (34.8 MB)  
+Date: 25 November 2026  
+Build audited: portable `dist\ClickScope.exe` (33.2 MB) and `installer_output\ClickScope-Setup.exe` (34.9 MB)  
 Environment: Windows, Python 3.13.17, Tk 8.6, Pillow 13, SQLite FTS5
 
 ## How this was audited
@@ -9,8 +9,9 @@ Environment: Windows, Python 3.13.17, Tk 8.6, Pillow 13, SQLite FTS5
 - Ran every local engine test as a plain script.
 - Ran `tests\ui_probe.py`, which builds all six pages in a real Tk window, searches the
   index, protects and unprotects a file, opens the website dialog, saves a site, changes
-  search filters, toggles notification settings, creates a backup, opens and clicks through
-  the notification panel, and follows `clickscope:` page targets.
+  search filters, runs the floating Universal Search bar, captures a new shortcut in Settings,
+  toggles notification settings, creates a backup, opens and clicks through the notification
+  panel, and follows `clickscope:` page targets.
 - Built and smoke-started the packaged executable.
 - Built the Inno Setup installer.
 - Captured the shipped screenshots from a seeded synthetic PC (`C:\Users\TECH ZONE\ClickScopeShots`).
@@ -27,6 +28,7 @@ Environment: Windows, Python 3.13.17, Tk 8.6, Pillow 13, SQLite FTS5
 | Blueprint | Complete | Snapshot, wallpaper, `.clickdna`, validation, missing folders only, no overwrite |
 | Website Memory | Complete | Add/edit/search/categories, Firefox import, JSON export/import, duplicate detection |
 | Notifications | Complete in app; Windows toast best-effort | No destructive action; click opens the related section. Manual toast click-through still unverified |
+| Universal Search | Complete | One configurable global shortcut, floating bar over any app, files/folders/Start Menu apps, no keyboard hook |
 | File colours | Partial by design | Colour marks in ClickScope only; Explorer has no supported per-file colour API |
 | External drives | Complete | Missing roots pruned from view, reconnect adds them back |
 | Settings, storage, persistence | Complete, except encrypted backup | Custom location, backup/restore data, startup, notification types, rebuild/remove index |
@@ -138,7 +140,30 @@ usable. Drive labels do not break the index when the drive letter is reused.
 Tests: `tests/test_filesearch.py` (disconnect/reconnect with a second root preserved) and the
 external-drive stand-in in `tests/ui_probe.py`.
 
-### 9. Settings, storage and privacy
+### 9. Universal Search
+
+Verified: a floating, always-on-top bar opens from one registered Windows shortcut (default
+`Ctrl+Alt+Space`) while ClickScope is running, including when its main window is minimised. It
+searches the same local file index (files and folders) and a local Start Menu app list, groups
+results as apps and files/folders, and supports `Up`/`Down`, `Enter`, `Ctrl+Enter` and `Esc`.
+Clicking a result opens it; nothing is deleted, moved or uploaded. The bar is positioned on the
+monitor under the mouse.
+
+The shortcut can be changed in **Settings → Universal search** with a capture dialog that requires
+Ctrl, Alt or Win plus one key. Invalid combinations are rejected before saving; a combination
+already owned by Windows or another app is reported, and the previous working shortcut is kept.
+Choosing a shortcut temporarily releases ClickScope's registration so the current combination can
+be captured. The feature can also be switched off entirely.
+
+Privacy: the shortcut uses `RegisterHotKey` for one combination only. There is no keyboard hook,
+no `GetAsyncKeyState` polling and no key logging. The app list is read from Start Menu `.lnk` files
+and kept in memory; only the chosen shortcut is written to `state.json`.
+
+Tests: `tests/test_hotkey.py` (parsing, rejection, real registration, restart, message delivery),
+`tests/test_apps.py` (local Start Menu list and ranking), and the floating-bar plus shortcut-dialog
+checks in `tests/ui_probe.py`.
+
+### 10. Settings, storage and privacy
 
 Verified: rebuild and remove index, start with Windows, keep-running choice, stored-data size
 and file count, custom storage location (`location.txt` pointer, data copied, old folder left
@@ -154,7 +179,7 @@ relies on the local Windows account and file permissions.
 
 Tests: `tests/test_appdata.py`, `tests/test_no_network.py`.
 
-### 10. Reliability
+### 11. Reliability
 
 Verified: corrupt SQLite index is moved aside and rebuilt; the damaged file is preserved;
 JSON stores use atomic replace and keep a `.bak` for protection; corrupt notification and
@@ -165,17 +190,19 @@ Background work runs in the existing job/queue model. No new busy loop or pollin
 was added; the 45-second drive check is a cheap directory-existence test, and a reconnected
 drive is scanned in the background only when it returns.
 
-### 11. Packaging and documentation
+### 12. Packaging and documentation
 
 Verified: `python -m PyInstaller ...` produced `dist\ClickScope.exe` and the executable starts
-and exits cleanly with `--smoke`. `ISCC.exe` produced
-`installer_output\ClickScope-Setup.exe`. Both artifacts include the icon/asset pack.
+and exits cleanly with `--demo --smoke` (the installed 1.x app was already holding the
+single-instance mutex, so the smoke run used the separate demo identity). `ISCC.exe` produced
+`installer_output\ClickScope-Setup.exe`. Both artifacts include the icon/asset pack and the new
+Universal Search modules.
 
 The build script now finds Inno Setup in `Program Files`, `Program Files (x86)` and the
 per-user `%LOCALAPPDATA%\Programs\Inno Setup 6` location.
 
 `README.md`, `TRUST.md`, the GitHub workflow and the screenshots were updated for the six-page
-app.
+app plus the floating Universal Search bar.
 
 ## Bugs found and fixed during this audit
 
@@ -202,15 +229,17 @@ protection tests OK
 websites tests OK
 notifications tests OK
 appdata tests OK
+hotkey tests OK
+apps tests OK
 no-network check OK
 UI probe OK
 
-dist\ClickScope.exe --smoke      exit 0
+dist\ClickScope.exe --demo --smoke      exit 0
 installer_output\ClickScope-Setup.exe   built successfully
 ```
 
-Screenshots: `docs/search.png`, `search-results.png`, `protection.png`, `websites.png`,
-`notifications.png`, `installers.png`, `blueprint.png`, `settings.png`,
+Screenshots: `docs/search.png`, `search-results.png`, `universal-search.png`, `protection.png`,
+`websites.png`, `notifications.png`, `installers.png`, `blueprint.png`, `settings.png`,
 `settings-storage.png`, `confirm.png`.
 
 ## Remaining manual check
@@ -218,3 +247,8 @@ Screenshots: `docs/search.png`, `search-results.png`, `protection.png`, `website
 1. Click a real Windows toast and confirm it opens the related ClickScope page. The protocol
    and target parsing are in place; only the operating-system click has not been exercised by
    an automated test.
+2. Press the real `Ctrl+Alt+Space` keys on the desktop, with ClickScope minimised, and confirm the
+   floating bar receives typing focus straight away. Registration, message delivery and the bar
+   itself are tested; this last step checks a physical key press in the active desktop session.
+3. Change the shortcut in Settings to a combination another app owns; confirm the inline error and
+   that the previous shortcut still works.
